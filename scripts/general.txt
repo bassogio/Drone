@@ -23,7 +23,7 @@ sudo systemctl restart rsyslog
 df -h
 
 
-
+rm -rf build install log
 
 
 source /opt/ros/jazzy/setup.bash

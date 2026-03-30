@@ -25,6 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'controller = controller.controller:main',
+            'action_server = controller.action_server:main',
+            'action_client = controller.action_client:main',
         ],
     },
 )

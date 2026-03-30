@@ -133,7 +133,7 @@ class ControllerNode(Node):
             self.get_logger().info("Waiting for position data...")
             return
         
-        # self.get_logger().info(f"x={self.current_x:.3f} | y={self.current_y:.3f} | z={self.current_z:.3f} | yaw={self.current_yaw:.3f}")
+        self.get_logger().info(f"x={self.current_x:.3f} | y={self.current_y:.3f} | z={self.current_z:.3f} | yaw={self.current_yaw:.3f}")
         
         self.state = self.get_parameter("state").value
 
