@@ -127,6 +127,23 @@ class ControllerNode(Node):
         msg.timestamp = self.get_clock().now().nanoseconds // 1000
         self.vehicle_command_pub.publish(msg)
 
+    # Set mode to offboard mode - this is required to start accepting offboard control commands
+    def request_offboard_mode(self):
+        self.publish_vehicle_command(
+            VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
+            1.0,
+            6.0
+        )
+        self.offboard_requested = True
+
+    # Arm the drone - this is required to start accepting offboard control commands
+    def request_arm(self):
+        self.publish_vehicle_command(
+            VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+            1.0
+        )
+        self.arm_requested = True
+
     def timer_callback(self):
 
         if None in [self.current_x, self.current_y, self.current_z, self.current_yaw]:
@@ -144,23 +161,15 @@ class ControllerNode(Node):
 
             self.target_x = self.current_x
             self.target_y = self.current_y
-            self.target_z = -5.0  # Takeoff to 5 meters altitude
+            self.target_z = -5.0
             self.target_yaw = 0.0
 
             self.publish_offboard_control_mode() # Enable offboard control mode
             self.publish_trajectory_setpoint() # Publish the takeoff setpoint
 
-            # Set mode to offboard mode - this is required to start accepting offboard control commands
-            self.publish_vehicle_command(
-                VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
-                1.0,
-                6.0
-            )
-            # Arm the drone - this is required to start accepting offboard control commands
-            self.publish_vehicle_command(
-                VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
-                1.0
-            )
+            self.request_offboard_mode() # Set mode to offboard mode
+            self.request_arm() # Arm the drone 
+
             self.state = "WAIT_FOR_TAKEOFF_COMPLETE"
         
         if self.state == "WAIT_FOR_TAKEOFF_COMPLETE":

@@ -25,8 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'controller = controller.controller:main',
-            'action_server = controller.action_server:main',
-            'action_client = controller.action_client:main',
+            'drone_action_server = controller.drone_action_server:main',
+            'drone_action_client = controller.drone_action_client:main',
         ],
     },
 )
