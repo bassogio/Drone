@@ -48,12 +48,15 @@ class DroneActionClient(Node):
     
     def goal_response_callback(self, future):
         self.goal_handle_: ClientGoalHandle = future.result()
+
         if self.goal_handle_.accepted:
             self.get_logger().info("Goal got accepted")
             self.goal_handle_.get_result_async().add_done_callback(self.goal_result_callback)
         else:
-            self.get_logger().info("Goal got rejected")
-    
+            self.get_logger().error("Goal got rejected")
+            self.destroy_node()
+            rclpy.shutdown()
+            
     def goal_result_callback(self, future):
         status = future.result().status
         result = future.result().result
@@ -78,35 +81,30 @@ def error_input_msg(node, reason=None):
         "\n  ros2 run controller action_client <COMMAND> [arguments]"
         "\n"
         "\nCommands:"
-        "\n  ON"
-        "\n      Turn on / prepare the drone."
-        "\n      Extra arguments are not allowed."
+        "\n  TAKEOFF [z]"
+        "\n      Take off to the requested z position."
+        "\n      z is optional."
+        "\n      Example: TAKEOFF 3"
         "\n"
         "\n  HOVER"
         "\n      Hold the current position."
         "\n      Extra arguments are not allowed."
         "\n"
-        "\n  LAND"
-        "\n      Land the drone."
-        "\n      Extra arguments are not allowed."
-        "\n"
-        "\n  TAKEOFF [z]"
-        "\n      Take off to the requested z position."
-        "\n      z is optional."
-        "\n      Example: TAKEOFF -3"
-        "\n"
         "\n  MOVE [x] [y] [z] [yaw]"
         "\n      Move to a target position and yaw."
         "\n      You can provide 0 to 4 numeric arguments."
         "\n      Missing values default to 0.0."
-        "\n      Example: MOVE 1 2 -3 0"
+        "\n      Example: MOVE 1 2 3 0"
+        "\n"
+        "\n  LAND"
+        "\n      Land the drone."
+        "\n      Extra arguments are not allowed."
         "\n"
         "\nExamples:"
-        "\n  ros2 run controller action_client ON"
+        "\n  ros2 run controller action_client TAKEOFF 3"
         "\n  ros2 run controller action_client HOVER"
         "\n  ros2 run controller action_client LAND"
-        "\n  ros2 run controller action_client TAKEOFF -3"
-        "\n  ros2 run controller action_client MOVE 1 2 -3 0"
+        "\n  ros2 run controller action_client MOVE 1 2 3 0"
         "\n"
         "\nNotes:"
         "\n  - Command names are case-insensitive."
@@ -122,27 +120,29 @@ def parse_command(argv):
 
     command = argv[1].upper()
 
-    if command in {"ON", "HOVER", "LAND"}:
+    if command in {"HOVER", "LAND"}:
         if len(argv) != 2:
             raise ValueError(f"{command} does not take extra arguments")
-        return command, 0.0, 0.0, 0.0, 0.0
+        return command, float('nan'), float('nan'), float('nan'), float('nan')
 
     if command == "TAKEOFF":
         if len(argv) not in {2, 3}:
             raise ValueError("TAKEOFF accepts zero or one argument")
-        target_z = float(argv[2]) if len(argv) == 3 else 0.0
-        return command, 0.0, 0.0, target_z, 0.0
+        target_z = -float(argv[2]) if len(argv) == 3 else float('nan')
+        return command, float('nan'), float('nan'), target_z, float('nan')
 
     if command == "MOVE":
-        if len(argv) > 6:
-            raise ValueError("MOVE accepts up to 4 numeric arguments")
+        if len(argv) > 6 or len(argv) < 3:
+            raise ValueError("MOVE accepts minimun 1 and up to 4 numeric arguments")
 
         values = [float(x) for x in argv[2:]]
+        
         while len(values) < 4:
-            values.append(0.0)
+            values.append(float('nan'))
 
         target_x, target_y, target_z, target_yaw = values
-        return command, target_x, target_y, target_z, target_yaw
+                
+        return command, target_x, target_y, -target_z, target_yaw
 
     raise ValueError(f"Unknown command: {command}")
 
@@ -162,11 +162,8 @@ def main(args=None):
 
     drone_action_client.send_goal(command, target_x, target_y, target_z, target_yaw)
 
-    try:
-        rclpy.spin(drone_action_client)
-    finally:
-        drone_action_client.destroy_node()
-        rclpy.shutdown()
+    rclpy.spin(drone_action_client)
+
 
 if __name__ == '__main__':
     main()
