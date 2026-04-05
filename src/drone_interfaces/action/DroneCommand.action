@@ -13,3 +13,4 @@ float32 current_y
 float32 current_z
 float32 current_yaw
 float32 distance_to_goal
+float32 yaw_error_to_goal

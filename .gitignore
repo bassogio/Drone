@@ -5,3 +5,5 @@
 /log
 /px4-ros2-interface-lib
 __pycache__
+garbage/
+/src/controller/controller/__pycache__/
