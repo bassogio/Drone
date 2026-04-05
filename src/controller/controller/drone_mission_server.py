@@ -23,6 +23,7 @@ class MissionServer(Node):
     STATE_HOVER = "HOVER"
     STATE_LAND = "LAND"
     STATE_MOVE = "MOVE"
+    STATE_HOME = "HOME"
     STATE_ERROR = "ERROR"
     
     def __init__(self):
@@ -162,7 +163,7 @@ class MissionServer(Node):
         # ===============
         #  Validation rules
         # ===============
-        allowed_commands = {"TAKEOFF", "HOVER", "LAND", "MOVE"}
+        allowed_commands = {"TAKEOFF", "HOVER", "LAND", "MOVE", "HOME"}
         
         if goal_request.command == '':
             self.get_logger().warn('Rejecting goal because command is empty')
@@ -275,8 +276,8 @@ class MissionServer(Node):
         if command == 'MOVE':
             return self.move_sequence(goal_handle, feedback_msg, result)
         
-        # if command == 'HOME':
-        #     return self.home_sequence(goal_handle, feedback_msg, result)
+        if command == 'HOME':
+            return self.home_sequence(goal_handle, feedback_msg, result)
         
         # if command == 'LIFT':
         #     return self.lift_sequence(goal_handle, feedback_msg, result)
@@ -307,32 +308,21 @@ class MissionServer(Node):
                                new_state, 
                                reason=None,
                                result: DroneCommand.Result = None):
-        goal_handle.canceled()
         self.set_state(previous_state, new_state, reason)
-        
-        # Fill result object
+
         result.success = False
-        if reason:
-            result.message = reason
-        else:
-            result.message = "Goal was canceled"
+        result.message = reason if reason else "Goal was canceled"
+
+        goal_handle.canceled(result)
         return result
     
-    def successful_completion(self, 
-                              goal_handle, 
-                              previous_state, 
-                              new_state, 
-                              reason=None, 
-                              result: DroneCommand.Result = None):
-        goal_handle.succeed()
+    def successful_completion(self, goal_handle, previous_state, new_state, reason=None, result=None):
         self.set_state(previous_state, new_state, reason)
-        
-        # Fill result object
+
         result.success = True
-        if reason:
-            result.message = reason
-        else:
-            result.message = "Goal completed successfully"
+        result.message = reason if reason else "Goal completed successfully"
+
+        goal_handle.succeed(result)
         return result
 
     def hold_current_position(self):
@@ -438,6 +428,8 @@ class MissionServer(Node):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
         
         while rclpy.ok():
+            altitude_from_home = abs(self.current_z)
+            
             if goal_handle.is_cancel_requested:
                 self.hold_current_position()
                 result = self.cancellation_requested(goal_handle, 
@@ -449,19 +441,18 @@ class MissionServer(Node):
                     self.takeoff_flag = True
                 return result  
             
-            altitude_from_home = abs(self.current_z)
             self.publish_feedback(goal_handle, feedback_msg, self.state, altitude_from_home)
 
             if altitude_from_home <= self.position_threshold:
                 self.takeoff_flag = False
                 self.offboard_active = False
 
-                self.successful_completion(goal_handle,
+                return self.successful_completion(goal_handle,
                                            self.state, 
                                            self.STATE_GROUNDED, 
                                            reason="Landing complete",
                                            result=result)
-                return result
+                 
 
             time.sleep(self.timer_period)
 
@@ -520,15 +511,6 @@ class MissionServer(Node):
         self.offboard_active = True
         
         while rclpy.ok():
-            distance = self.distance_to_target()
-            yaw_error = abs(self.yaw_error_to_target())
-            
-            self.publish_feedback(goal_handle,
-                                feedback_msg,
-                                state=self.state,
-                                distance=distance,
-                                yaw_error=yaw_error)
-            
             if goal_handle.is_cancel_requested:
                 self.hold_current_position()
                 result = self.cancellation_requested(goal_handle, 
@@ -538,6 +520,15 @@ class MissionServer(Node):
                                                     result=result)
                 return result
             
+            distance = self.distance_to_target()
+            yaw_error = abs(self.yaw_error_to_target())
+            
+            self.publish_feedback(goal_handle,
+                                feedback_msg,
+                                state=self.state,
+                                distance=distance,
+                                yaw_error=yaw_error)
+                        
             if yaw_only_move:
                 position_ok = True
                 yaw_ok = yaw_error <= self.yaw_threshold
@@ -562,7 +553,67 @@ class MissionServer(Node):
         result.success = False
         result.message = "Node stopped while moving to target"
         return result    
+    
+    def home_sequence(self,goal_handle, feedback_msg, result):
+        self.set_state(self.state, self.STATE_HOME, reason="Moving to home position")     
+        
+        self.target_x = 0.0
+        self.target_y = 0.0
+        self.target_z = self.current_z
+        self.target_yaw = 0.0
+        
+        # Publish setpoints for about 1 second before switching PX4 to offboard.
+        for _ in range(10):
+            self.publish_offboard_control_mode()
+            self.publish_trajectory_setpoint()
+            time.sleep(self.timer_period)
+        
+        self.request_offboard_mode()
+        time.sleep(0.2)
+        self.request_arm()
+        self.offboard_active = True
+        
+        while rclpy.ok():
+            if goal_handle.is_cancel_requested:
+                self.hold_current_position()
+                result = self.cancellation_requested(goal_handle, 
+                                                    self.state,
+                                                    self.STATE_HOME,
+                                                    reason="Home cancled by client",
+                                                    result=result)
+                return result
+            
+            distance = self.distance_to_target()
+            yaw_error = abs(self.yaw_error_to_target())
+            
+            self.publish_feedback(goal_handle,
+                                feedback_msg,
+                                state=self.state,
+                                distance=distance,
+                                yaw_error=yaw_error)
+                        
+            
+            position_ok = distance <= self.position_threshold
+            yaw_ok = yaw_error <= self.yaw_threshold
+        
+            if position_ok and yaw_ok:
+                self.is_airborne = True
+                self.hold_current_position()
+                return self.successful_completion(goal_handle,
+                                                self.state, 
+                                                self.STATE_HOVER, 
+                                                reason="Home complete, hovering",
+                                                result=result)
                 
+            time.sleep(self.timer_period)
+                            
+        goal_handle.abort()
+        self.hold_current_position()
+        self.set_state(self.state, self.STATE_HOVER, "Node stopped while moving home")
+        result.success = False
+        result.message = "Node stopped while moving home"
+        return result    
+                        
     def publish_offboard_control_mode(self):
         msg = OffboardControlMode()
         msg.position = True

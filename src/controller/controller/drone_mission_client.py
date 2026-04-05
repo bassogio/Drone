@@ -38,20 +38,24 @@ class MissionClient(Node):
         self._get_result_future = None
         self.goal_handle: ClientGoalHandle | None = None
 
-        # self.missions = [
-        #     MissionStep(step_id=1, name="Takeoff", command="TAKEOFF", target_z=5.0),
-        #     MissionStep(step_id=2, name="Move to A", command="MOVE", target_x=1.0),
-        #     MissionStep(step_id=3, name="Move to B", command="MOVE", target_x=8.0, target_y=3.0, target_z=5.0),
-        #     MissionStep(step_id=4, name="Land", command="LAND"),
-        # ]
         self.missions = [
             MissionStep(step_id=1, name="Takeoff", command="TAKEOFF", target_z=5.0),
-            MissionStep(step_id=2, name="Spin +30", command="MOVE", target_yaw=30.0),
-            MissionStep(step_id=3, name="Spin -30", command="MOVE", target_yaw=-30.0),
-            MissionStep(step_id=4, name="Spin +90", command="MOVE", target_yaw=90.0),
-            MissionStep(step_id=5, name="Spin -90", command="MOVE", target_yaw=-90.0),
-            MissionStep(step_id=6, name="Land", command="LAND"),
-        ]   
+            MissionStep(step_id=2, name="Move to A", command="MOVE", target_x=5.0),
+            MissionStep(step_id=3, name="Spin +30", command="MOVE", target_yaw=30.0),
+            MissionStep(step_id=4, name="Move to B", command="MOVE", target_z=8.0),
+            MissionStep(step_id=5, name="Move to C", command="MOVE", target_x=8.0, target_y=3.0, target_z=5.0, target_yaw=90.0),
+            MissionStep(step_id=6, name="Spin -30", command="MOVE", target_yaw=-60.0),
+            MissionStep(step_id=7, name="HOME", command="HOME"),
+            MissionStep(step_id=8, name="Land", command="LAND"),
+        ]
+        # self.missions = [
+        #     MissionStep(step_id=1, name="Takeoff", command="TAKEOFF", target_z=5.0),
+        #     MissionStep(step_id=2, name="Spin +30", command="MOVE", target_yaw=30.0),
+        #     MissionStep(step_id=3, name="Spin -30", command="MOVE", target_yaw=-30.0),
+        #     MissionStep(step_id=4, name="Spin +90", command="MOVE", target_yaw=90.0),
+        #     MissionStep(step_id=5, name="Spin -90", command="MOVE", target_yaw=-90.0),
+        #     MissionStep(step_id=6, name="Land", command="LAND"),
+        # ]   
         self.current_mission_index = 0
         
         self.get_logger().info('Mission client created')
@@ -102,16 +106,6 @@ class MissionClient(Node):
             f"yaw={fb.current_yaw:.2f}, dist={fb.distance_to_goal:.2f}, yaw_err={fb.yaw_error_to_goal:.2f}"
         )
 
-        # =========================
-        # TODO: Optional cancel trigger
-        # =========================
-        #
-        # Example:
-        # if feedback.progress >= 50.0:
-        #     self.cancel_goal()
-        #
-        # Leave commented unless you actually want automatic cancel behavior.
-
     def goal_response_callback(self, future):
         """
         Called when the server accepts or rejects the goal.
@@ -145,43 +139,8 @@ class MissionClient(Node):
         
         if result.success:
             self.current_mission_index += 1
-            self.send_goal(self.missions[self.current_mission_index]) # Start next mission step
-        else:
-            self.get_logger().error('Mission failed. Not proceeding to next step.')
-
-    def result_callback(self, future):
-        result_wrapper = future.result()
-        result = result_wrapper.result
-        status = result_wrapper.status
-
-        status_name = {
-            GoalStatus.STATUS_UNKNOWN: "UNKNOWN",
-            GoalStatus.STATUS_ACCEPTED: "ACCEPTED",
-            GoalStatus.STATUS_EXECUTING: "EXECUTING",
-            GoalStatus.STATUS_CANCELING: "CANCELING",
-            GoalStatus.STATUS_SUCCEEDED: "SUCCEEDED",
-            GoalStatus.STATUS_CANCELED: "CANCELED",
-            GoalStatus.STATUS_ABORTED: "ABORTED",
-        }.get(status, f"UNRECOGNIZED({status})")
-
-        message = result.message if result.message else "<empty message from server>"
-
-        self.get_logger().info('Final result received:')
-        self.get_logger().info(f'  status  = {status} ({status_name})')
-        self.get_logger().info(f'  success = {result.success}')
-        self.get_logger().info(f'  message = "{message}"')
-
-        if status == GoalStatus.STATUS_SUCCEEDED and not result.success:
-            self.get_logger().warn(
-                'ROS action status says SUCCEEDED, but result.success is False. '
-                'This means the server logic is inconsistent.'
-            )
-
-        if result.success:
-            self.current_mission_index += 1
-
             if self.current_mission_index < len(self.missions):
-                self.send_goal(self.missions[self.current_mission_index])
+                self.send_goal(self.missions[self.current_mission_index]) # Start next mission step
             else:
                 self.get_logger().info('All mission steps completed')
         else:
@@ -212,19 +171,19 @@ class MissionClient(Node):
         else:
             self.get_logger().warn('Cancel request rejected')
 
-    def start_mission(self):
-        if self.current_mission_index < len(self.missions):
-            self.send_goal(self.missions[self.current_mission_index])
-        else:
-            self.get_logger().info('All mission steps completed')
+    # def start_mission(self):
+    #     if self.current_mission_index < len(self.missions):
+    #         self.send_goal(self.missions[self.current_mission_index])
+    #     else:
+    #         self.get_logger().info('All mission steps completed')
             
 def main(args=None):
     rclpy.init(args=args)
 
     node = MissionClient()
 
-    node.start_mission()
-
+    # node.start_mission()
+    node.send_goal(node.missions[node.current_mission_index]) # Start first mission step
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
