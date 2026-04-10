@@ -35,8 +35,8 @@ QGC_APP="$HOME/QGroundControl-x86_64.AppImage"
 XRCE_PORT="8888"
 
 # PX4 make target
-PX4_TARGET="gz_x500_${WORLD_NAME}"
-
+# PX4_TARGET="gz_x500_${WORLD_NAME}"
+PX4_TARGET="gz_x500_depth_${WORLD_NAME}"
 
 # -----------------------------
 # Help message
@@ -93,6 +93,23 @@ start_stack() {
     gnome-terminal -- bash -c "\"$QGC_APP\"; exec bash"
     sleep 3
 
+    # Gazebo to ROS 2 bridge for camera topics
+    echo "Starting Gazebo to ROS 2 bridge for camera topics"
+    gnome-terminal -- bash -c "
+    source /opt/ros/jazzy/setup.bash &&
+    ros2 run ros_gz_bridge parameter_bridge \
+    /world/baylands/model/x500_depth_0/link/camera_link/sensor/IMX214/image@sensor_msgs/msg/Image@gz.msgs.Image \
+    /depth_camera@sensor_msgs/msg/Image@gz.msgs.Image \
+    /depth_camera/points@sensor_msgs/msg/PointCloud2@gz.msgs.PointCloudPacked \
+    /camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo \
+    --ros-args \
+    -r /world/baylands/model/x500_depth_0/link/camera_link/sensor/IMX214/image:=/camera/color/image_raw \
+    -r /depth_camera:=/camera/depth/image_raw \
+    -r /depth_camera/points:=/camera/depth/points \
+    -r /camera_info:=/camera/camera_info;
+    exec bash"
+    sleep 2
+
     echo "All processes started"
 }
 
@@ -107,6 +124,8 @@ world_reset() {
 
     # Stop Gazebo Sim related processes
     pkill -f "gz sim" || true
+    pkill -f gazebo || true
+    pkill -f ign || true
     pkill -f "gz-server" || true
     pkill -f "gz-client" || true
     pkill -f "ruby $(which gz)" || true
@@ -122,25 +141,64 @@ world_reset() {
 stop_stack() {
     echo "Stopping PX4, Gazebo, MicroXRCEAgent, and QGroundControl"
 
-    # Stop PX4 related processes
-    pkill -f "px4" || true
+    # Stop PX4
+    pkill -f '^px4$' || true
+    pkill -f '/bin/px4' || true
 
     # Stop Gazebo Sim related processes
-    pkill -f "gz sim" || true
-    pkill -f "gz-server" || true
-    pkill -f "gz-client" || true
-    pkill -f "ruby $(which gz)" || true
+    pkill -f 'gz sim' || true
+    pkill -f 'gz-server' || true
+    pkill -f 'gz-client' || true
+    pkill -f 'ruby.*/gz' || true
+    pkill -f '/usr/bin/gz' || true
+    pkill -f 'gazebo' || true
 
     # Stop XRCE agent
-    pkill -f "MicroXRCEAgent" || true
+    pkill -f 'MicroXRCEAgent' || true
 
     # Stop QGroundControl
-    pkill -f "QGroundControl-x86_64.AppImage" || true
-    pkill -f "QGroundControl" || true
+    pkill -f 'QGroundControl-x86_64.AppImage' || true
+    pkill -f 'QGroundControl' || true
+
+    # Stop Gazebo to ROS 2 bridge
+    pkill -f 'ros2 run ros_gz_bridge parameter_bridge' || true
+    pkill -f 'ros_gz_bridge' || true
 
     sleep 3
-    echo "All processes stopped"
+
+    echo "Checking for remaining drone stack processes..."
+    pgrep -af 'px4|gz sim|gz-server|gz-client|ruby.*/gz|/usr/bin/gz|gazebo|MicroXRCEAgent|ros_gz_bridge|QGroundControl' || true
+
+    echo "Stop command finished"
 }
+# stop_stack() {
+#     echo "Stopping PX4, Gazebo, MicroXRCEAgent, and QGroundControl"
+
+#     # Stop PX4 related processes
+#     pkill -f "px4" || true
+
+#     # Stop Gazebo Sim related processes
+#     pkill -f "gz sim" || true
+#     pkill -f gazebo || true
+#     pkill -f ign || true
+#     pkill -f "gz-server" || true
+#     pkill -f "gz-client" || true
+#     pkill -f "ruby $(which gz)" || true
+  
+#     # Stop XRCE agent
+#     pkill -f "MicroXRCEAgent" || true
+
+#     # Stop QGroundControl
+#     pkill -f "QGroundControl-x86_64.AppImage" || true
+#     pkill -f "QGroundControl" || true
+
+#     # Stop Gazebo to ROS 2 bridge
+#     pkill -f "ros2 run ros_gz_bridge parameter_bridge" || true
+#     pkill -f "ros_gz_bridge" || true
+
+#     sleep 3
+#     echo "All processes stopped"
+# }
 
 
 # -----------------------------

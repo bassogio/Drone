@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import math
 import time
 from unittest import result
@@ -443,6 +444,7 @@ class MissionServer(Node):
             
             self.publish_feedback(goal_handle, feedback_msg, self.state, altitude_from_home)
 
+            # TODO: use /fmu/out/vehicle_land_detected?
             if altitude_from_home <= self.position_threshold:
                 self.takeoff_flag = False
                 self.offboard_active = False
