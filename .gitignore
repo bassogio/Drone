@@ -7,3 +7,8 @@
 __pycache__
 garbage/
 /src/controller/controller/__pycache__/
+src/controller/controller/temp.py
+src/controller/controller/temp2.py
+src/controller/controller/temp3.py
+src/controller/controller/temp4.py
+/src/controller/controller/temp.py

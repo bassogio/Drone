@@ -16,7 +16,7 @@ from px4_msgs.msg import OffboardControlMode
 from px4_msgs.msg import TrajectorySetpoint
 from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import VehicleLocalPosition
-
+# TODO: use odometry message to better understand position and orientation using one message? (instead of localposition)
 class MissionServer(Node):
     STATE_WAITING_FOR_POSITION = "WAITING_FOR_POSITION"
     STATE_GROUNDED = "GROUNDED"
@@ -35,6 +35,7 @@ class MissionServer(Node):
         # ===============
         #  Parameters
         # ===============
+        # TODO: declare publishers and subscribers as well
         self.declare_parameter("target_x", float('nan'))
         self.declare_parameter("target_y", float('nan'))
         self.declare_parameter("target_z", float('nan'))
