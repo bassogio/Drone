@@ -23,7 +23,9 @@ set -e
 # -----------------------------
 
 # Gazebo world name
-WORLD_NAME="baylands"
+# WORLD_NAME="baylands"
+WORLD_NAME="walls"
+
 
 # PX4 directory
 PX4_DIR="$HOME/PX4-Autopilot"

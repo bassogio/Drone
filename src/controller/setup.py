@@ -27,10 +27,11 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'px4_msgs_to_ros2 = controller.px4_msgs_to_ros2:main',
+            'point_cloud_node = controller.point_cloud:main',
+            'map_node = controller.occupancy_map:main',
             'drone_mission_client = controller.drone_mission_client:main',
             'drone_mission_server = controller.drone_mission_server:main',
-            'point_cloud_node = controller.pointcloud:main',
-            'map_to_base_tf = controller.map_to_base_tf:main',
         ],
     },
 )
