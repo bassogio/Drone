@@ -78,22 +78,12 @@ jobs:
           grep -q 'drivers/kernelsu/Kconfig' kernel/drivers/Kconfig || \
             printf '\nsource "drivers/kernelsu/Kconfig"\n' >> kernel/drivers/Kconfig
 
-      - name: Extract and run exact compatibility integration
+      - name: Run exact compatibility integration
+        shell: bash
         run: |
-          python3 <<'PY'
-          from pathlib import Path
-          import textwrap
-
-          workflow = Path('.github/workflows/touchgrass-final-exact.yml')
-          lines = workflow.read_text().splitlines()
-          start = next(i for i, line in enumerate(lines) if "python3 <<'PY'" in line) + 1
-          end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'PY')
-          script = textwrap.dedent('\n'.join(lines[start:end])) + '\n'
-          Path('integrate_exact.py').write_text(script)
-          compile(script, 'integrate_exact.py', 'exec')
-          PY
-
-          KERNEL_ROOT=kernel python3 integrate_exact.py
+          base64 -d touchgrass-port/integrate_exact.py.gz.b64 | gzip -d > integrate_exact.py
+          python3 -m py_compile integrate_exact.py
+          KERNEL_ROOT=kernel python3 integrate_exact.py 2>&1 | tee exact-integration.log
 
       - name: Audit exact versions and feature configuration
         run: |
@@ -152,6 +142,7 @@ jobs:
           if-no-files-found: warn
           compression-level: 9
           path: |
+            exact-integration.log
             exact-integration-audit.txt
             exact-build.status
             exact-build-report.txt
