@@ -1,6 +1,9 @@
-name: Port exact SUSFS v1.5.5 kernel hooks to TouchGrass
+name: Build exact TouchGrass KSUN v3.2.0 legacy SUSFS v1.5.5
 
 on:
+  push:
+    branches:
+      - touchgrass-susfs-build
   pull_request:
     branches:
       - main
@@ -10,14 +13,19 @@ permissions:
   contents: read
 
 jobs:
-  port:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+
     steps:
-      - name: Install dependencies
+      - name: Check out integration branch
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git patch python3
+          sudo apt-get install -y bc bison build-essential cpio flex git libelf-dev libssl-dev patch python3 rsync unzip zip
+          make --version | head -n1
 
       - name: Clone exact TouchGrass source
         run: |
@@ -26,56 +34,131 @@ jobs:
           git remote add origin https://github.com/micr0softstore/samsung_android_kernel_a52xq.git
           git fetch --depth=1 origin 6bf351bdf18bdb228db79e66f14a7a9c0178e5d7
           git checkout --detach FETCH_HEAD
+          git config user.name "TouchGrass Exact Builder"
+          git config user.email "actions@users.noreply.github.com"
 
-      - name: Fetch exact Linux 4.19 SUSFS v1.5.5 implementation
+      - name: Apply exact SUSFS v1.5.5 Linux 4.19 implementation
+        shell: bash
         run: |
           git init susfs-reference
           cd susfs-reference
           git remote add origin https://github.com/sakana164/kernel_xiaomi_sm8250.git
           git fetch --filter=blob:none --depth=2 origin af8fdfc7e9a3b6c67a8068f1d82c29db9e456022
           git checkout --detach FETCH_HEAD
+          cd ..
 
-      - name: Port the v1.5.5 filesystem hooks
-        shell: bash
-        run: |
           set +e
           git -C susfs-reference show --format= --binary af8fdfc7e9a3b6c67a8068f1d82c29db9e456022 \
             | patch -d kernel -p1 --batch --forward --fuzz=3 \
-              > v155-kernel-port.log 2>&1
-          echo ${PIPESTATUS[1]} > v155-kernel-port.status
-          find kernel -name '*.rej' -o -name '*.orig' | sort > v155-kernel-rejects.txt
+              > susfs-kernel-port.log 2>&1
+          echo ${PIPESTATUS[1]} > susfs-kernel-port.status
+          set -e
 
-          grep -RIl 'CONFIG_KSU_SUSFS\|susfs_' \
-            kernel/fs kernel/include/linux kernel/kernel kernel/mm kernel/security \
-            | sort > v155-kernel-touched-files.txt
+          find kernel -name '*.orig' -delete
+          find kernel -name '*.rej' -delete
 
-          cd kernel
-          git add -N . 2>/dev/null || true
-          git diff --binary -- . ':!toolchain' > ../touchgrass-susfs-v1.5.5-kernel.patch
+      - name: Import KernelSU-Next v3.2.0-legacy
+        run: |
+          git init ksun-reference
+          cd ksun-reference
+          git remote add origin https://github.com/crdroidandroid/android_kernel_oneplus_sm8350.git
+          git config core.sparseCheckout true
+          printf 'drivers/kernelsu/\n' > .git/info/sparse-checkout
+          git fetch --depth=1 origin b0e9f56d42a064443cdf4ace2187595eb04544e9
+          git checkout --detach FETCH_HEAD
           cd ..
 
-          {
-            echo "Patch status: $(cat v155-kernel-port.status)"
-            echo
-            echo 'Touched files:'
-            cat v155-kernel-touched-files.txt
-            echo
-            echo 'Rejects:'
-            cat v155-kernel-rejects.txt
-          } > v155-kernel-port-report.txt
+          rm -rf kernel/KernelSU kernel/drivers/kernelsu
+          mkdir -p kernel/KernelSU/kernel
+          cp -a ksun-reference/drivers/kernelsu/. kernel/KernelSU/kernel/
+          ln -s ../KernelSU/kernel kernel/drivers/kernelsu
 
-      - name: Upload port diagnostics
+          grep -q 'obj-$(CONFIG_KSU).*kernelsu' kernel/drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> kernel/drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' kernel/drivers/Kconfig || \
+            printf '\nsource "drivers/kernelsu/Kconfig"\n' >> kernel/drivers/Kconfig
+
+      - name: Extract and run exact compatibility integration
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/touchgrass-final-exact.yml')
+          lines = workflow.read_text().splitlines()
+          start = next(i for i, line in enumerate(lines) if "python3 <<'PY'" in line) + 1
+          end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'PY')
+          script = textwrap.dedent('\n'.join(lines[start:end])) + '\n'
+          Path('integrate_exact.py').write_text(script)
+          compile(script, 'integrate_exact.py', 'exec')
+          PY
+
+          KERNEL_ROOT=kernel python3 integrate_exact.py
+
+      - name: Audit exact versions and feature configuration
+        run: |
+          grep -q '#define SUSFS_VERSION "v1.5.5"' kernel/include/linux/susfs.h
+          grep -q 'KSU_GIT_TAG := v3.2.0-legacy' kernel/KernelSU/kernel/Kbuild
+          grep -q '^CONFIG_KSU=y' kernel/arch/arm64/configs/a52xq_defconfig
+          grep -q '^CONFIG_KSU_MANUAL_HOOK=y' kernel/arch/arm64/configs/a52xq_defconfig
+          grep -q '^CONFIG_KSU_SUSFS=y' kernel/arch/arm64/configs/a52xq_defconfig
+          grep -q '^# CONFIG_KSU_SUSFS_SUS_SU is not set' kernel/arch/arm64/configs/a52xq_defconfig
+
+          {
+            echo 'Kernel base: 6bf351bdf18bdb228db79e66f14a7a9c0178e5d7'
+            echo 'KernelSU-Next: v3.2.0-legacy'
+            echo 'SUSFS: v1.5.5'
+            echo 'Hook mode: manual'
+            echo 'SUS_SU: disabled'
+            echo
+            grep -RIn 'ksu_handle_' kernel/fs/exec.c kernel/fs/open.c kernel/fs/read_write.c kernel/fs/stat.c kernel/drivers/input/input.c kernel/kernel/reboot.c || true
+          } > exact-integration-audit.txt
+
+      - name: Build kernel using original source script
+        shell: bash
+        run: |
+          set +e
+          cd kernel
+          rm -rf out
+          chmod +x build_kernel.sh tools/dtc 2>/dev/null || true
+          bash build_kernel.sh 2>&1 | tee ../exact-build.log
+          status=${PIPESTATUS[0]}
+          echo "$status" > ../exact-build.status
+          exit 0
+
+      - name: Prepare diagnostics and patch
+        if: always()
+        shell: bash
+        run: |
+          cd kernel
+          git add -N . 2>/dev/null || true
+          git diff --binary -- . ':!toolchain' ':!out' > ../touchgrass-exact-integration.patch
+          cd ..
+          tail -n 600 exact-build.log > exact-build-tail.log 2>/dev/null || true
+          {
+            echo "Build status: $(cat exact-build.status 2>/dev/null || echo missing)"
+            echo "Image present: $(test -f kernel/out/arch/arm64/boot/Image && echo yes || echo no)"
+            echo "Image size: $(stat -c %s kernel/out/arch/arm64/boot/Image 2>/dev/null || echo 0)"
+            echo "SUSFS version: $(sed -n 's/^#define SUSFS_VERSION "\([^"]*\)"/\1/p' kernel/include/linux/susfs.h | head -n1)"
+            echo "KernelSU tag: $(sed -n 's/^KSU_GIT_TAG := //p' kernel/KernelSU/kernel/Kbuild | head -n1)"
+          } > exact-build-report.txt
+
+      - name: Upload exact kernel result
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: touchgrass-v155-kernel-port-${{ github.run_number }}
+          name: touchgrass-exact-ksun320-susfs155-${{ github.run_number }}
           retention-days: 14
-          if-no-files-found: error
+          if-no-files-found: warn
+          compression-level: 9
           path: |
-            v155-kernel-port.log
-            v155-kernel-port.status
-            v155-kernel-port-report.txt
-            v155-kernel-touched-files.txt
-            v155-kernel-rejects.txt
-            touchgrass-susfs-v1.5.5-kernel.patch
-            kernel/**/*.rej
-            kernel/**/*.orig
+            exact-integration-audit.txt
+            exact-build.status
+            exact-build-report.txt
+            exact-build.log
+            exact-build-tail.log
+            susfs-kernel-port.log
+            susfs-kernel-port.status
+            touchgrass-exact-integration.patch
+            kernel/out/.config
+            kernel/out/arch/arm64/boot/Image
