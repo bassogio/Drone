@@ -1,0 +1,63 @@
+name: Find exact KSUN legacy SUSFS v1.5.5 reference
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Clone reference history
+        run: |
+          git init reference
+          cd reference
+          git remote add origin https://github.com/FlopKernel-Series/flop_trinket-mi_kernel.git
+          git fetch --filter=blob:none --depth=3000 origin b338157ec68406afd0757404202c2f202b134205
+          git checkout --detach FETCH_HEAD
+
+      - name: Locate matching historical tree
+        shell: bash
+        run: |
+          set -e
+          : > version-history.txt
+          : > exact-candidates.txt
+          git -C reference log --all --format=%H -- include/linux/susfs.h | while read -r sha; do
+            version=$(git -C reference show "$sha:include/linux/susfs.h" 2>/dev/null | sed -n 's/^#define SUSFS_VERSION "\([^"]*\)"/\1/p' | head -n1)
+            tag=$(git -C reference show "$sha:drivers/kernelsu/kernel/Kbuild" 2>/dev/null | sed -n 's/^KSU_GIT_TAG := //p' | head -n1)
+            printf '%s | %s | %s\n' "$sha" "${version:-missing}" "${tag:-missing}" >> version-history.txt
+            if [ "$version" = "v1.5.5" ] && [ "$tag" = "v3.2.0-legacy" ]; then
+              echo "$sha" >> exact-candidates.txt
+            fi
+          done
+
+          if [ ! -s exact-candidates.txt ]; then
+            echo 'No exact same-commit candidate found.' >> exact-candidates.txt
+          else
+            candidate=$(head -n1 exact-candidates.txt)
+            mkdir -p exact-tree
+            git -C reference archive "$candidate" \
+              drivers/kernelsu/kernel \
+              fs/susfs.c \
+              include/linux/susfs.h \
+              include/linux/susfs_def.h \
+              | tar -x -C exact-tree
+            git -C reference show -s --format='%H%n%P%n%s%n%ci' "$candidate" > candidate-metadata.txt
+          fi
+
+      - name: Upload reference report
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-v155-reference-${{ github.run_number }}
+          retention-days: 14
+          path: |
+            version-history.txt
+            exact-candidates.txt
+            candidate-metadata.txt
+            exact-tree/
