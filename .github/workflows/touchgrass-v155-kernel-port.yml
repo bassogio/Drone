@@ -84,7 +84,7 @@ jobs:
           base64 -d touchgrass-port/integrate_exact.py.gz.b64 | gzip -d > integrate_exact.py
           python3 -m py_compile integrate_exact.py
           KERNEL_ROOT=kernel python3 integrate_exact.py 2>&1 | tee exact-integration.log
-          python3 touchgrass-port/fix_fdinfo.py
+          base64 -d touchgrass-port/fix_fdinfo_v2.py.b64 | python3
 
       - name: Audit exact versions and feature configuration
         run: |
