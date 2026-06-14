@@ -1,0 +1,81 @@
+name: Port exact SUSFS v1.5.5 kernel hooks to TouchGrass
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  port:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git patch python3
+
+      - name: Clone exact TouchGrass source
+        run: |
+          git init kernel
+          cd kernel
+          git remote add origin https://github.com/micr0softstore/samsung_android_kernel_a52xq.git
+          git fetch --depth=1 origin 6bf351bdf18bdb228db79e66f14a7a9c0178e5d7
+          git checkout --detach FETCH_HEAD
+
+      - name: Fetch exact Linux 4.19 SUSFS v1.5.5 implementation
+        run: |
+          git init susfs-reference
+          cd susfs-reference
+          git remote add origin https://github.com/sakana164/kernel_xiaomi_sm8250.git
+          git fetch --filter=blob:none --depth=2 origin af8fdfc7e9a3b6c67a8068f1d82c29db9e456022
+          git checkout --detach FETCH_HEAD
+
+      - name: Port the v1.5.5 filesystem hooks
+        shell: bash
+        run: |
+          set +e
+          git -C susfs-reference show --format= --binary af8fdfc7e9a3b6c67a8068f1d82c29db9e456022 \
+            | patch -d kernel -p1 --batch --forward --fuzz=3 \
+              > v155-kernel-port.log 2>&1
+          echo ${PIPESTATUS[1]} > v155-kernel-port.status
+          find kernel -name '*.rej' -o -name '*.orig' | sort > v155-kernel-rejects.txt
+
+          grep -RIl 'CONFIG_KSU_SUSFS\|susfs_' \
+            kernel/fs kernel/include/linux kernel/kernel kernel/mm kernel/security \
+            | sort > v155-kernel-touched-files.txt
+
+          cd kernel
+          git add -N . 2>/dev/null || true
+          git diff --binary -- . ':!toolchain' > ../touchgrass-susfs-v1.5.5-kernel.patch
+          cd ..
+
+          {
+            echo "Patch status: $(cat v155-kernel-port.status)"
+            echo
+            echo 'Touched files:'
+            cat v155-kernel-touched-files.txt
+            echo
+            echo 'Rejects:'
+            cat v155-kernel-rejects.txt
+          } > v155-kernel-port-report.txt
+
+      - name: Upload port diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: touchgrass-v155-kernel-port-${{ github.run_number }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            v155-kernel-port.log
+            v155-kernel-port.status
+            v155-kernel-port-report.txt
+            v155-kernel-touched-files.txt
+            v155-kernel-rejects.txt
+            touchgrass-susfs-v1.5.5-kernel.patch
+            kernel/**/*.rej
+            kernel/**/*.orig
