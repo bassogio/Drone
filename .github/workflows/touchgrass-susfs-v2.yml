@@ -1,0 +1,225 @@
+name: TouchGrass KernelSU-Next SUSFS v2 port
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  port-and-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential cpio flex git libelf-dev libssl-dev patch python3 rsync unzip zip
+
+      - name: Clone exact TouchGrass source
+        run: |
+          git init kernel
+          cd kernel
+          git remote add origin https://github.com/micr0softstore/samsung_android_kernel_a52xq.git
+          git fetch --depth=1 origin 6bf351bdf18bdb228db79e66f14a7a9c0178e5d7
+          git checkout --detach FETCH_HEAD
+          git config user.name "TouchGrass SUSFS Builder"
+          git config user.email "actions@users.noreply.github.com"
+
+      - name: Clone the integrated Linux 4.19 reference
+        run: |
+          git init reference
+          cd reference
+          git remote add origin https://github.com/crdroidandroid/android_kernel_xiaomi_sm8150.git
+          git fetch --filter=blob:none --depth=2500 origin d43213aed9edcec58d37dce951c9619ad9c52595
+          git checkout --detach FETCH_HEAD
+          git cat-file -e 45227e985175b8417e3a6ddaa8b0a8a409fa008f^\{commit\}
+
+      - name: Apply SUSFS prerequisite backports
+        shell: bash
+        run: |
+          set +e
+          : > prerequisite-results.txt
+          for short in \
+            d406904bb175cb9791b5aed4404df3268859d91b \
+            9ba899398576d329288b023566d3a731470ad13a \
+            e784224542fab4b3888d9103a1f678015221a7d1 \
+            ed8fd10d97a50ec424ae38a40351b5de060f9838 \
+            4ba6dccf73a620e565803e5995d5748ecfbb56a2 \
+            0a8cbf3 \
+            37ae244 \
+            49a5115 \
+            6f94042 \
+            bbd5aec \
+            849ca8c \
+            6071a48 \
+            03fd2fb \
+            95f8be4 \
+            27956d2 \
+            7f2847d
+          do
+            sha=$(git -C reference rev-parse "$short" 2>/dev/null)
+            if [ -z "$sha" ]; then
+              echo "$short missing" | tee -a prerequisite-results.txt
+              continue
+            fi
+            git -C reference show --format= --binary "$sha" -- fs include kernel lib mm security \
+              | patch -d kernel -p1 --batch --forward --fuzz=3 \
+                > "prerequisite-${short}.log" 2>&1
+            status=${PIPESTATUS[1]}
+            echo "$short $status" | tee -a prerequisite-results.txt
+          done
+          exit 0
+
+      - name: Apply the complete SUSFS commit series
+        shell: bash
+        run: |
+          set +e
+          git -C reference log --reverse --format=%H --regexp-ignore-case --grep='susfs' \
+            45227e985175b8417e3a6ddaa8b0a8a409fa008f^..d43213aed9edcec58d37dce951c9619ad9c52595 \
+            > susfs-commits.txt
+          : > susfs-results.txt
+          while read -r sha; do
+            [ -n "$sha" ] || continue
+            git -C reference show --format= --binary "$sha" -- fs include kernel lib mm security \
+              | patch -d kernel -p1 --batch --forward --fuzz=3 \
+                > "susfs-${sha}.log" 2>&1
+            status=${PIPESTATUS[1]}
+            subject=$(git -C reference show -s --format=%s "$sha")
+            echo "$sha $status $subject" | tee -a susfs-results.txt
+          done < susfs-commits.txt
+          exit 0
+
+      - name: Import the matching integrated KernelSU-Next core
+        run: |
+          rm -rf kernel/KernelSU kernel/drivers/kernelsu
+          mkdir -p kernel/KernelSU/kernel
+          cp -a reference/drivers/kernelsu/. kernel/KernelSU/kernel/
+          ln -s ../KernelSU/kernel kernel/drivers/kernelsu
+          grep -q 'obj-$(CONFIG_KSU).*kernelsu' kernel/drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> kernel/drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' kernel/drivers/Kconfig || \
+            printf '\nsource "drivers/kernelsu/Kconfig"\n' >> kernel/drivers/Kconfig
+
+      - name: Preserve Samsung manual hooks and configure features
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          reboot = Path('kernel/kernel/reboot.c')
+          text = reboot.read_text()
+          if 'ksu_handle_sys_reboot' not in text:
+              marker = 'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,'
+              declaration = '#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n'
+              if marker not in text:
+                  raise SystemExit('reboot syscall declaration was not found')
+              text = text.replace(marker, declaration + marker, 1)
+              body = '\tchar buffer[256];\n\tint ret = 0;\n'
+              replacement = body + '\n#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n'
+              if body not in text:
+                  raise SystemExit('reboot syscall body was not found')
+              text = text.replace(body, replacement, 1)
+              reboot.write_text(text)
+
+          cfg = Path('kernel/arch/arm64/configs/a52xq_defconfig')
+          lines = cfg.read_text().splitlines()
+          prefixes = (
+              'CONFIG_KSU=', 'CONFIG_KSU_MANUAL_HOOK=', 'CONFIG_KSU_KPROBES_HOOK=',
+              'CONFIG_KSU_SUSFS=', 'CONFIG_KSU_SUSFS_',
+          )
+          lines = [line for line in lines if not line.startswith(prefixes)]
+          lines += [
+              'CONFIG_KSU=y',
+              'CONFIG_KSU_MANUAL_HOOK=y',
+              '# CONFIG_KSU_KPROBES_HOOK is not set',
+              'CONFIG_KSU_SUSFS=y',
+              'CONFIG_KSU_SUSFS_SUS_PATH=y',
+              'CONFIG_KSU_SUSFS_SUS_MOUNT=y',
+              'CONFIG_KSU_SUSFS_SUS_KSTAT=y',
+              'CONFIG_KSU_SUSFS_TRY_UMOUNT=y',
+              'CONFIG_KSU_SUSFS_SPOOF_UNAME=y',
+              '# CONFIG_KSU_SUSFS_ENABLE_LOG is not set',
+              'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y',
+              'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y',
+              'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y',
+              'CONFIG_KSU_SUSFS_SUS_MAP=y',
+          ]
+          cfg.write_text('\n'.join(lines) + '\n')
+          PY
+
+      - name: Audit patch coverage
+        shell: bash
+        run: |
+          set +e
+          find kernel -name '*.rej' -o -name '*.orig' | sort > reject-files.txt
+          grep -RIl 'CONFIG_KSU_SUSFS' \
+            kernel/fs kernel/include/linux kernel/kernel kernel/mm kernel/security \
+            | sort > susfs-touched-files.txt
+          {
+            echo 'Manual hooks:'
+            grep -RIn 'ksu_handle_' kernel/fs/exec.c kernel/fs/open.c kernel/fs/read_write.c kernel/fs/stat.c kernel/drivers/input/input.c kernel/kernel/reboot.c || true
+            echo
+            echo 'SUSFS files:'
+            cat susfs-touched-files.txt
+            echo
+            echo 'Rejects:'
+            cat reject-files.txt
+          } > integration-audit.txt
+
+      - name: Build kernel
+        shell: bash
+        run: |
+          set +e
+          cd kernel
+          rm -rf out
+          chmod +x build_kernel.sh tools/dtc 2>/dev/null || true
+          bash build_kernel.sh 2>&1 | tee ../build-v2.log
+          status=${PIPESTATUS[0]}
+          echo "$status" > ../build-v2.status
+          exit 0
+
+      - name: Package diagnostics and source patch
+        if: always()
+        shell: bash
+        run: |
+          cd kernel
+          git add -N . 2>/dev/null || true
+          git diff --binary -- . ':!toolchain' ':!out' > ../touchgrass-ksunext-susfs-v2.patch
+          cd ..
+          tail -n 400 build-v2.log > build-v2-tail.log 2>/dev/null || true
+          tar -czf touchgrass-susfs-v2-integration.tar.gz \
+            kernel/KernelSU \
+            kernel/fs/susfs.c \
+            kernel/include/linux/susfs.h \
+            kernel/include/linux/susfs_def.h \
+            2>/dev/null || true
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: touchgrass-susfs-v2-${{ github.run_number }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            prerequisite-results.txt
+            prerequisite-*.log
+            susfs-commits.txt
+            susfs-results.txt
+            susfs-*.log
+            reject-files.txt
+            susfs-touched-files.txt
+            integration-audit.txt
+            build-v2.status
+            build-v2.log
+            build-v2-tail.log
+            touchgrass-ksunext-susfs-v2.patch
+            touchgrass-susfs-v2-integration.tar.gz
+            kernel/out/.config
+            kernel/out/arch/arm64/boot/Image
+            kernel/**/*.rej
+            kernel/**/*.orig
