@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - touchgrass-susfs-build
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
