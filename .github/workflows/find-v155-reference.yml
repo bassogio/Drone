@@ -25,12 +25,13 @@ jobs:
       - name: Locate matching historical tree
         shell: bash
         run: |
-          set -e
+          set +e
           : > version-history.txt
           : > exact-candidates.txt
           git -C reference log --all --format=%H -- include/linux/susfs.h | while read -r sha; do
             version=$(git -C reference show "$sha:include/linux/susfs.h" 2>/dev/null | sed -n 's/^#define SUSFS_VERSION "\([^"]*\)"/\1/p' | head -n1)
             tag=$(git -C reference show "$sha:drivers/kernelsu/kernel/Kbuild" 2>/dev/null | sed -n 's/^KSU_GIT_TAG := //p' | head -n1)
+            [ -n "$tag" ] || tag=$(git -C reference show "$sha:drivers/kernelsu/Kbuild" 2>/dev/null | sed -n 's/^KSU_GIT_TAG := //p' | head -n1)
             printf '%s | %s | %s\n' "$sha" "${version:-missing}" "${tag:-missing}" >> version-history.txt
             if [ "$version" = "v1.5.5" ] && [ "$tag" = "v3.2.0-legacy" ]; then
               echo "$sha" >> exact-candidates.txt
@@ -42,20 +43,26 @@ jobs:
           else
             candidate=$(head -n1 exact-candidates.txt)
             mkdir -p exact-tree
-            git -C reference archive "$candidate" \
+            for path in \
               drivers/kernelsu/kernel \
+              drivers/kernelsu \
               fs/susfs.c \
               include/linux/susfs.h \
-              include/linux/susfs_def.h \
-              | tar -x -C exact-tree
+              include/linux/susfs_def.h
+            do
+              git -C reference cat-file -e "$candidate:$path" 2>/dev/null || continue
+              git -C reference archive "$candidate" "$path" | tar -x -C exact-tree
+            done
             git -C reference show -s --format='%H%n%P%n%s%n%ci' "$candidate" > candidate-metadata.txt
           fi
+          exit 0
 
       - name: Upload reference report
         uses: actions/upload-artifact@v4
         with:
           name: exact-v155-reference-${{ github.run_number }}
           retention-days: 14
+          if-no-files-found: warn
           path: |
             version-history.txt
             exact-candidates.txt
