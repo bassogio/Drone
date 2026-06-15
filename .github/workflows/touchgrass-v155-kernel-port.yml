@@ -57,7 +57,7 @@ jobs:
         shell: bash
         run: |
           python3 touchgrass-port/apply_sukisu_safe.py | tee sukisu-profile.log
-          python3 touchgrass-port/fix_sukisu_419.py | tee sukisu-419.log
+          python3 touchgrass-port/fix_sukisu_419_v2.py | tee sukisu-419.log
 
       - name: Audit pinned source, hooks, and safety profile
         shell: bash
