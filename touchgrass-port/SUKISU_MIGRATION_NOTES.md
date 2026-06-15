@@ -1,0 +1,1 @@
+Experimental migration branch for Samsung Galaxy A52 5G (a52xq): replace KernelSU-Next with SukiSU Ultra builtin while preserving the working reduced SUSFS profile and keeping Kernel Umount permanently disabled.
