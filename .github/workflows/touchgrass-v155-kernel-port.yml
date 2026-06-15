@@ -1,4 +1,4 @@
-name: Build TouchGrass hard-disabled kernel umount KSUN v3.2.0 legacy SUSFS v1.5.5
+name: Build TouchGrass SukiSU Ultra builtin experimental kernel
 
 on:
   push:
@@ -34,91 +34,66 @@ jobs:
           git remote add origin https://github.com/micr0softstore/samsung_android_kernel_a52xq.git
           git fetch --depth=1 origin 6bf351bdf18bdb228db79e66f14a7a9c0178e5d7
           git checkout --detach FETCH_HEAD
-          git config user.name "TouchGrass Hard Disable Builder"
+          git config user.name "TouchGrass SukiSU Builder"
           git config user.email "actions@users.noreply.github.com"
 
-      - name: Apply exact SUSFS v1.5.5 Linux 4.19 implementation
-        shell: bash
+      - name: Import pinned SukiSU Ultra builtin tree
         run: |
-          git init susfs-reference
-          cd susfs-reference
-          git remote add origin https://github.com/sakana164/kernel_xiaomi_sm8250.git
-          git fetch --filter=blob:none --depth=2 origin af8fdfc7e9a3b6c67a8068f1d82c29db9e456022
-          git checkout --detach FETCH_HEAD
-          cd ..
-
-          set +e
-          git -C susfs-reference show --format= --binary af8fdfc7e9a3b6c67a8068f1d82c29db9e456022 \
-            | patch -d kernel -p1 --batch --forward --fuzz=3 \
-              > susfs-kernel-port.log 2>&1
-          echo ${PIPESTATUS[1]} > susfs-kernel-port.status
-          set -e
-
-          find kernel -name '*.orig' -delete
-          find kernel -name '*.rej' -delete
-
-      - name: Import KernelSU-Next v3.2.0-legacy
-        run: |
-          git init ksun-reference
-          cd ksun-reference
-          git remote add origin https://github.com/crdroidandroid/android_kernel_oneplus_sm8350.git
-          git config core.sparseCheckout true
-          printf 'drivers/kernelsu/\n' > .git/info/sparse-checkout
-          git fetch --depth=1 origin b0e9f56d42a064443cdf4ace2187595eb04544e9
-          git checkout --detach FETCH_HEAD
-          cd ..
-
           rm -rf kernel/KernelSU kernel/drivers/kernelsu
-          mkdir -p kernel/KernelSU/kernel
-          cp -a ksun-reference/drivers/kernelsu/. kernel/KernelSU/kernel/
-          ln -s ../KernelSU/kernel kernel/drivers/kernelsu
+          git init kernel/KernelSU
+          cd kernel/KernelSU
+          git remote add origin https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+          git fetch --depth=1 origin b88403d2561b6e00dff84a3c851e630c62f57fd0
+          git checkout --detach FETCH_HEAD
+          cd ../..
 
+          ln -s ../KernelSU/kernel kernel/drivers/kernelsu
           grep -q 'obj-$(CONFIG_KSU).*kernelsu' kernel/drivers/Makefile || \
             printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> kernel/drivers/Makefile
           grep -q 'drivers/kernelsu/Kconfig' kernel/drivers/Kconfig || \
             printf '\nsource "drivers/kernelsu/Kconfig"\n' >> kernel/drivers/Kconfig
 
-      - name: Apply safe profile and hard-disable Kernel Umount
+      - name: Apply conservative SukiSU profile
         shell: bash
         run: |
-          base64 -d touchgrass-port/integrate_exact.py.gz.b64 | gzip -d > integrate_exact.py
-          python3 -m py_compile integrate_exact.py
-          KERNEL_ROOT=kernel python3 integrate_exact.py 2>&1 | tee exact-integration.log
-          base64 -d touchgrass-port/fix_fdinfo_v2.py.b64 | python3
-          python3 touchgrass-port/apply_safe_diagnostic.py | tee safe-diagnostic.log
-          python3 touchgrass-port/hard_disable_kernel_umount.py | tee hard-disable-kernel-umount.log
+          python3 touchgrass-port/apply_sukisu_safe.py | tee sukisu-profile.log
 
-      - name: Audit versions, safe profile, and hard-disabled Kernel Umount
+      - name: Audit pinned source, hooks, and safety profile
+        shell: bash
         run: |
-          grep -q '#define SUSFS_VERSION "v1.5.5"' kernel/include/linux/susfs.h
-          grep -q 'KSU_GIT_TAG := v3.2.0-legacy' kernel/KernelSU/kernel/Kbuild
+          test "$(git -C kernel/KernelSU rev-parse HEAD)" = "b88403d2561b6e00dff84a3c851e630c62f57fd0"
           grep -q '^CONFIG_KSU=y' kernel/arch/arm64/configs/a52xq_defconfig
-          grep -q '^CONFIG_KSU_MANUAL_HOOK=y' kernel/arch/arm64/configs/a52xq_defconfig
-          grep -q '^CONFIG_KSU_SUSFS=y' kernel/arch/arm64/configs/a52xq_defconfig
-          grep -q '^# CONFIG_KSU_SUSFS_SUS_SU is not set' kernel/arch/arm64/configs/a52xq_defconfig
-          grep -q '^# CONFIG_KSU_SUSFS_SUS_PATH is not set' kernel/arch/arm64/configs/a52xq_defconfig
-          grep -q '^# CONFIG_KSU_SUSFS_SUS_KSTAT is not set' kernel/arch/arm64/configs/a52xq_defconfig
-          grep -q '^# CONFIG_KSU_SUSFS_TRY_UMOUNT is not set' kernel/arch/arm64/configs/a52xq_defconfig
-          grep -q '^# CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT is not set' kernel/arch/arm64/configs/a52xq_defconfig
-          grep -q '^# CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT is not set' kernel/arch/arm64/configs/a52xq_defconfig
-          grep -q '^# CONFIG_KSU_SUSFS_OPEN_REDIRECT is not set' kernel/arch/arm64/configs/a52xq_defconfig
-          cmp -s ksun-reference/drivers/kernelsu/hook/setuid_hook.c kernel/KernelSU/kernel/hook/setuid_hook.c
+          grep -q '^# CONFIG_KPM is not set' kernel/arch/arm64/configs/a52xq_defconfig
+          grep -q '^# CONFIG_KSU_SUSFS is not set' kernel/arch/arm64/configs/a52xq_defconfig
+          grep -q '^# CONFIG_KSU_FEATURE_ADBROOT is not set' kernel/arch/arm64/configs/a52xq_defconfig
           grep -q 'static bool ksu_kernel_umount_enabled = false;' kernel/KernelSU/kernel/feature/kernel_umount.c
           grep -A4 'void __init ksu_kernel_umount_init' kernel/KernelSU/kernel/feature/kernel_umount.c | grep -q 'ksu_kernel_umount_enabled = false;'
           ! grep -A5 'void __init ksu_kernel_umount_init' kernel/KernelSU/kernel/feature/kernel_umount.c | grep -q 'ksu_register_feature_handler'
 
+          grep -Rqs 'int ksu_handle_execveat(' kernel/KernelSU/kernel
+          grep -Rqs 'int ksu_handle_execveat_sucompat(' kernel/KernelSU/kernel
+          grep -Rqs 'int ksu_handle_faccessat(' kernel/KernelSU/kernel
+          grep -Rqs 'int ksu_handle_stat(' kernel/KernelSU/kernel
+          grep -Rqs 'ksu_handle_sys_read' kernel/KernelSU/kernel
+          grep -Rqs 'ksu_handle_sys_reboot' kernel/KernelSU/kernel
+
           {
             echo 'Kernel base: 6bf351bdf18bdb228db79e66f14a7a9c0178e5d7'
-            echo 'KernelSU-Next: v3.2.0-legacy'
-            echo 'SUSFS: v1.5.5'
-            echo 'Hook mode: manual'
-            echo 'Profile: safe reduced-feature build'
-            echo 'Kernel Umount: permanently disabled and hidden from Manager'
-            echo 'Original KernelSU setuid path: restored'
-            echo 'Disabled SUSFS features: SUS_PATH, SUS_KSTAT, TRY_UMOUNT, AUTO_ADD_TRY_UMOUNT, AUTO_ADD_BIND_MOUNT, OPEN_REDIRECT, SUS_SU'
+            echo 'Kernel: Linux 4.19.152-touchGrassKernel'
+            echo 'SukiSU Ultra builtin commit: b88403d2561b6e00dff84a3c851e630c62f57fd0'
+            echo 'SukiSU commit date: 2026-06-15'
+            echo 'Hook mode: existing TouchGrass manual hooks'
+            echo 'SUSFS: disabled for first hardware test'
+            echo 'KPM: disabled'
+            echo 'ADB root: disabled'
+            echo 'Kernel Umount: permanently disabled and hidden'
             echo
+            echo 'TouchGrass hook call sites:'
             grep -RIn 'ksu_handle_' kernel/fs/exec.c kernel/fs/open.c kernel/fs/read_write.c kernel/fs/stat.c kernel/drivers/input/input.c kernel/kernel/reboot.c || true
-          } > hard-disable-integration-audit.txt
+            echo
+            echo 'SukiSU hook definitions:'
+            grep -RInE 'int ksu_handle_(execveat|execveat_sucompat|faccessat|stat|sys_read|sys_reboot|input_handle_event)' kernel/KernelSU/kernel || true
+          } > sukisu-integration-audit.txt
 
       - name: Build kernel using original source script
         shell: bash
@@ -127,48 +102,45 @@ jobs:
           cd kernel
           rm -rf out
           chmod +x build_kernel.sh tools/dtc 2>/dev/null || true
-          bash build_kernel.sh 2>&1 | tee ../hard-disable-build.log
+          bash build_kernel.sh 2>&1 | tee ../sukisu-build.log
           status=${PIPESTATUS[0]}
-          echo "$status" > ../hard-disable-build.status
+          echo "$status" > ../sukisu-build.status
           exit 0
 
-      - name: Prepare diagnostics and patch
+      - name: Prepare diagnostics and source patch
         if: always()
         shell: bash
         run: |
           cd kernel
           git add -N . 2>/dev/null || true
-          git diff --binary -- . ':!toolchain' ':!out' > ../touchgrass-hard-disable-kernel-umount.patch
+          git diff --binary -- . ':!toolchain' ':!out' ':!KernelSU' > ../touchgrass-sukisu-ultra.patch
           cd ..
-          tail -n 600 hard-disable-build.log > hard-disable-build-tail.log 2>/dev/null || true
+          tail -n 700 sukisu-build.log > sukisu-build-tail.log 2>/dev/null || true
           {
-            echo "Build status: $(cat hard-disable-build.status 2>/dev/null || echo missing)"
+            echo "Build status: $(cat sukisu-build.status 2>/dev/null || echo missing)"
             echo "Image present: $(test -f kernel/out/arch/arm64/boot/Image && echo yes || echo no)"
             echo "Image size: $(stat -c %s kernel/out/arch/arm64/boot/Image 2>/dev/null || echo 0)"
-            echo "SUSFS version: $(sed -n 's/^#define SUSFS_VERSION "\([^"]*\)"/\1/p' kernel/include/linux/susfs.h | head -n1)"
-            echo "KernelSU tag: $(sed -n 's/^KSU_GIT_TAG := //p' kernel/KernelSU/kernel/Kbuild | head -n1)"
+            echo "SukiSU commit: $(git -C kernel/KernelSU rev-parse HEAD 2>/dev/null || echo missing)"
+            echo 'SUSFS: disabled'
+            echo 'KPM: disabled'
             echo 'Kernel Umount: hard-disabled and unsupported'
-          } > hard-disable-build-report.txt
+          } > sukisu-build-report.txt
 
-      - name: Upload hard-disabled kernel result
+      - name: Upload SukiSU experimental kernel result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: touchgrass-hard-disable-kernel-umount-${{ github.run_number }}
+          name: touchgrass-sukisu-ultra-experimental-${{ github.run_number }}
           retention-days: 14
           if-no-files-found: warn
           compression-level: 9
           path: |
-            exact-integration.log
-            safe-diagnostic.log
-            hard-disable-kernel-umount.log
-            hard-disable-integration-audit.txt
-            hard-disable-build.status
-            hard-disable-build-report.txt
-            hard-disable-build.log
-            hard-disable-build-tail.log
-            susfs-kernel-port.log
-            susfs-kernel-port.status
-            touchgrass-hard-disable-kernel-umount.patch
+            sukisu-profile.log
+            sukisu-integration-audit.txt
+            sukisu-build.status
+            sukisu-build-report.txt
+            sukisu-build.log
+            sukisu-build-tail.log
+            touchgrass-sukisu-ultra.patch
             kernel/out/.config
             kernel/out/arch/arm64/boot/Image
