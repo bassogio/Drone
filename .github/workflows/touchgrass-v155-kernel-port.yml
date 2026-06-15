@@ -1,4 +1,4 @@
-name: Build TouchGrass safe diagnostic KSUN v3.2.0 legacy SUSFS v1.5.5
+name: Build TouchGrass hard-disabled kernel umount KSUN v3.2.0 legacy SUSFS v1.5.5
 
 on:
   push:
@@ -34,7 +34,7 @@ jobs:
           git remote add origin https://github.com/micr0softstore/samsung_android_kernel_a52xq.git
           git fetch --depth=1 origin 6bf351bdf18bdb228db79e66f14a7a9c0178e5d7
           git checkout --detach FETCH_HEAD
-          git config user.name "TouchGrass Safe Diagnostic Builder"
+          git config user.name "TouchGrass Hard Disable Builder"
           git config user.email "actions@users.noreply.github.com"
 
       - name: Apply exact SUSFS v1.5.5 Linux 4.19 implementation
@@ -78,7 +78,7 @@ jobs:
           grep -q 'drivers/kernelsu/Kconfig' kernel/drivers/Kconfig || \
             printf '\nsource "drivers/kernelsu/Kconfig"\n' >> kernel/drivers/Kconfig
 
-      - name: Run compatibility integration and apply safe diagnostic profile
+      - name: Apply safe profile and hard-disable Kernel Umount
         shell: bash
         run: |
           base64 -d touchgrass-port/integrate_exact.py.gz.b64 | gzip -d > integrate_exact.py
@@ -86,8 +86,9 @@ jobs:
           KERNEL_ROOT=kernel python3 integrate_exact.py 2>&1 | tee exact-integration.log
           base64 -d touchgrass-port/fix_fdinfo_v2.py.b64 | python3
           python3 touchgrass-port/apply_safe_diagnostic.py | tee safe-diagnostic.log
+          python3 touchgrass-port/hard_disable_kernel_umount.py | tee hard-disable-kernel-umount.log
 
-      - name: Audit versions and reduced feature configuration
+      - name: Audit versions, safe profile, and hard-disabled Kernel Umount
         run: |
           grep -q '#define SUSFS_VERSION "v1.5.5"' kernel/include/linux/susfs.h
           grep -q 'KSU_GIT_TAG := v3.2.0-legacy' kernel/KernelSU/kernel/Kbuild
@@ -101,20 +102,23 @@ jobs:
           grep -q '^# CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT is not set' kernel/arch/arm64/configs/a52xq_defconfig
           grep -q '^# CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT is not set' kernel/arch/arm64/configs/a52xq_defconfig
           grep -q '^# CONFIG_KSU_SUSFS_OPEN_REDIRECT is not set' kernel/arch/arm64/configs/a52xq_defconfig
-          cmp -s ksun-reference/drivers/kernelsu/feature/kernel_umount.c kernel/KernelSU/kernel/feature/kernel_umount.c
           cmp -s ksun-reference/drivers/kernelsu/hook/setuid_hook.c kernel/KernelSU/kernel/hook/setuid_hook.c
+          grep -q 'static bool ksu_kernel_umount_enabled = false;' kernel/KernelSU/kernel/feature/kernel_umount.c
+          grep -A4 'void __init ksu_kernel_umount_init' kernel/KernelSU/kernel/feature/kernel_umount.c | grep -q 'ksu_kernel_umount_enabled = false;'
+          ! grep -A5 'void __init ksu_kernel_umount_init' kernel/KernelSU/kernel/feature/kernel_umount.c | grep -q 'ksu_register_feature_handler'
 
           {
             echo 'Kernel base: 6bf351bdf18bdb228db79e66f14a7a9c0178e5d7'
             echo 'KernelSU-Next: v3.2.0-legacy'
             echo 'SUSFS: v1.5.5'
             echo 'Hook mode: manual'
-            echo 'Profile: reduced-feature diagnostic'
-            echo 'Original KernelSU setuid/unmount path: restored'
-            echo 'Disabled: SUS_PATH, SUS_KSTAT, TRY_UMOUNT, AUTO_ADD_TRY_UMOUNT, AUTO_ADD_BIND_MOUNT, OPEN_REDIRECT, SUS_SU'
+            echo 'Profile: safe reduced-feature build'
+            echo 'Kernel Umount: permanently disabled and hidden from Manager'
+            echo 'Original KernelSU setuid path: restored'
+            echo 'Disabled SUSFS features: SUS_PATH, SUS_KSTAT, TRY_UMOUNT, AUTO_ADD_TRY_UMOUNT, AUTO_ADD_BIND_MOUNT, OPEN_REDIRECT, SUS_SU'
             echo
             grep -RIn 'ksu_handle_' kernel/fs/exec.c kernel/fs/open.c kernel/fs/read_write.c kernel/fs/stat.c kernel/drivers/input/input.c kernel/kernel/reboot.c || true
-          } > safe-integration-audit.txt
+          } > hard-disable-integration-audit.txt
 
       - name: Build kernel using original source script
         shell: bash
@@ -123,9 +127,9 @@ jobs:
           cd kernel
           rm -rf out
           chmod +x build_kernel.sh tools/dtc 2>/dev/null || true
-          bash build_kernel.sh 2>&1 | tee ../safe-build.log
+          bash build_kernel.sh 2>&1 | tee ../hard-disable-build.log
           status=${PIPESTATUS[0]}
-          echo "$status" > ../safe-build.status
+          echo "$status" > ../hard-disable-build.status
           exit 0
 
       - name: Prepare diagnostics and patch
@@ -134,36 +138,37 @@ jobs:
         run: |
           cd kernel
           git add -N . 2>/dev/null || true
-          git diff --binary -- . ':!toolchain' ':!out' > ../touchgrass-safe-diagnostic.patch
+          git diff --binary -- . ':!toolchain' ':!out' > ../touchgrass-hard-disable-kernel-umount.patch
           cd ..
-          tail -n 600 safe-build.log > safe-build-tail.log 2>/dev/null || true
+          tail -n 600 hard-disable-build.log > hard-disable-build-tail.log 2>/dev/null || true
           {
-            echo "Build status: $(cat safe-build.status 2>/dev/null || echo missing)"
+            echo "Build status: $(cat hard-disable-build.status 2>/dev/null || echo missing)"
             echo "Image present: $(test -f kernel/out/arch/arm64/boot/Image && echo yes || echo no)"
             echo "Image size: $(stat -c %s kernel/out/arch/arm64/boot/Image 2>/dev/null || echo 0)"
             echo "SUSFS version: $(sed -n 's/^#define SUSFS_VERSION "\([^"]*\)"/\1/p' kernel/include/linux/susfs.h | head -n1)"
             echo "KernelSU tag: $(sed -n 's/^KSU_GIT_TAG := //p' kernel/KernelSU/kernel/Kbuild | head -n1)"
-            echo 'Profile: reduced-feature diagnostic'
-          } > safe-build-report.txt
+            echo 'Kernel Umount: hard-disabled and unsupported'
+          } > hard-disable-build-report.txt
 
-      - name: Upload safe diagnostic kernel result
+      - name: Upload hard-disabled kernel result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: touchgrass-safe-diagnostic-${{ github.run_number }}
+          name: touchgrass-hard-disable-kernel-umount-${{ github.run_number }}
           retention-days: 14
           if-no-files-found: warn
           compression-level: 9
           path: |
             exact-integration.log
             safe-diagnostic.log
-            safe-integration-audit.txt
-            safe-build.status
-            safe-build-report.txt
-            safe-build.log
-            safe-build-tail.log
+            hard-disable-kernel-umount.log
+            hard-disable-integration-audit.txt
+            hard-disable-build.status
+            hard-disable-build-report.txt
+            hard-disable-build.log
+            hard-disable-build-tail.log
             susfs-kernel-port.log
             susfs-kernel-port.status
-            touchgrass-safe-diagnostic.patch
+            touchgrass-hard-disable-kernel-umount.patch
             kernel/out/.config
             kernel/out/arch/arm64/boot/Image
