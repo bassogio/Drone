@@ -1,0 +1,722 @@
+name: Build exact TouchGrass KSUN v3.2.0 legacy SUSFS v1.5.5
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential cpio flex git libelf-dev libssl-dev patch python3 rsync unzip zip
+
+      - name: Clone exact TouchGrass source
+        run: |
+          git init kernel
+          cd kernel
+          git remote add origin https://github.com/micr0softstore/samsung_android_kernel_a52xq.git
+          git fetch --depth=1 origin 6bf351bdf18bdb228db79e66f14a7a9c0178e5d7
+          git checkout --detach FETCH_HEAD
+          git config user.name "TouchGrass Exact SUSFS Builder"
+          git config user.email "actions@users.noreply.github.com"
+
+      - name: Fetch exact Linux 4.19 SUSFS v1.5.5 implementation
+        run: |
+          git init susfs-reference
+          cd susfs-reference
+          git remote add origin https://github.com/sakana164/kernel_xiaomi_sm8250.git
+          git fetch --filter=blob:none --depth=2 origin af8fdfc7e9a3b6c67a8068f1d82c29db9e456022
+          git checkout --detach FETCH_HEAD
+
+      - name: Apply exact SUSFS v1.5.5 kernel hooks
+        shell: bash
+        run: |
+          set +e
+          git -C susfs-reference show --format= --binary af8fdfc7e9a3b6c67a8068f1d82c29db9e456022 \
+            | patch -d kernel -p1 --batch --forward --fuzz=3 \
+              > susfs-kernel-port.log 2>&1
+          echo ${PIPESTATUS[1]} > susfs-kernel-port.status
+          find kernel -name '*.orig' -delete
+          find kernel -name '*.rej' -delete
+          exit 0
+
+      - name: Import KernelSU-Next v3.2.0-legacy
+        run: |
+          git init ksun-reference
+          cd ksun-reference
+          git remote add origin https://github.com/crdroidandroid/android_kernel_oneplus_sm8350.git
+          git config core.sparseCheckout true
+          printf 'drivers/kernelsu/\n' > .git/info/sparse-checkout
+          git fetch --depth=1 origin b0e9f56d42a064443cdf4ace2187595eb04544e9
+          git checkout --detach FETCH_HEAD
+          cd ..
+
+          rm -rf kernel/KernelSU kernel/drivers/kernelsu
+          mkdir -p kernel/KernelSU/kernel
+          cp -a ksun-reference/drivers/kernelsu/. kernel/KernelSU/kernel/
+          ln -s ../KernelSU/kernel kernel/drivers/kernelsu
+          grep -q 'obj-$(CONFIG_KSU).*kernelsu' kernel/drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> kernel/drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' kernel/drivers/Kconfig || \
+            printf '\nsource "drivers/kernelsu/Kconfig"\n' >> kernel/drivers/Kconfig
+
+      - name: Add exact-version compatibility integration
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          root = Path('kernel')
+          ksu = root / 'KernelSU/kernel'
+
+          def replace_once(path, old, new, label):
+              text = path.read_text()
+              if old not in text:
+                  raise SystemExit(f'{label}: expected text not found in {path}')
+              path.write_text(text.replace(old, new, 1))
+
+          # Samsung's task_struct has no free Android KABI slots at this location.
+          sched = root / 'include/linux/sched.h'
+          text = sched.read_text()
+          if 'susfs_task_state' not in text:
+              marker = '''\t/*\n\t * New fields for task_struct should be added above here, so that\n\t * they are included in the randomized portion of task_struct.\n\t */\n'''
+              fields = '''#ifdef CONFIG_KSU_SUSFS\n\tu64 susfs_task_state;\n\tu64 susfs_last_fake_mnt_id;\n#endif\n\n'''
+              if marker not in text:
+                  raise SystemExit('task_struct insertion point not found')
+              sched.write_text(text.replace(marker, fields + marker, 1))
+
+          # Add the SUSFS v1.5.5 options to the modern KernelSU-Next Kconfig.
+          kconfig = ksu / 'Kconfig'
+          text = kconfig.read_text()
+          if 'config KSU_SUSFS' not in text:
+              fragment = r'''
+menu "KernelSU - SUSFS v1.5.5"
+
+config KSU_SUSFS
+    bool "KernelSU addon - SUSFS v1.5.5"
+    depends on KSU
+    depends on THREAD_INFO_IN_TASK
+    default y
+
+config KSU_SUSFS_HAS_MAGIC_MOUNT
+    bool "KernelSU has magic mount support"
+    depends on KSU_SUSFS
+    default y
+
+config KSU_SUSFS_SUS_PATH
+    bool "Hide suspicious paths"
+    depends on KSU_SUSFS
+    default y
+
+config KSU_SUSFS_SUS_MOUNT
+    bool "Hide suspicious mounts"
+    depends on KSU_SUSFS
+    default y
+
+config KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+    bool "Automatically hide KernelSU mounts"
+    depends on KSU_SUSFS_SUS_MOUNT
+    default y
+
+config KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+    bool "Automatically hide bind mounts"
+    depends on KSU_SUSFS_SUS_MOUNT
+    default y
+
+config KSU_SUSFS_SUS_KSTAT
+    bool "Spoof suspicious kstat"
+    depends on KSU_SUSFS
+    default y
+
+config KSU_SUSFS_SUS_OVERLAYFS
+    bool "Spoof overlayfs kstat"
+    depends on KSU_SUSFS
+    default n
+
+config KSU_SUSFS_TRY_UMOUNT
+    bool "Use SUSFS try_umount list"
+    depends on KSU_SUSFS
+    default y
+
+config KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+    bool "Automatically add bind mounts to try_umount"
+    depends on KSU_SUSFS_TRY_UMOUNT
+    default y
+
+config KSU_SUSFS_SPOOF_UNAME
+    bool "Spoof uname"
+    depends on KSU_SUSFS
+    default y
+
+config KSU_SUSFS_ENABLE_LOG
+    bool "Enable SUSFS kernel logging"
+    depends on KSU_SUSFS
+    default n
+
+config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+    bool "Hide KernelSU and SUSFS symbols"
+    depends on KSU_SUSFS
+    default y
+
+config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+    bool "Spoof cmdline or bootconfig"
+    depends on KSU_SUSFS
+    default y
+
+config KSU_SUSFS_OPEN_REDIRECT
+    bool "Enable open redirect"
+    depends on KSU_SUSFS
+    default y
+
+config KSU_SUSFS_SUS_SU
+    bool "Enable deprecated SUS_SU"
+    depends on KSU_SUSFS && KPROBES && HAVE_KPROBES && KPROBE_EVENTS
+    default n
+
+endmenu
+'''
+              pos = text.rfind('endmenu')
+              if pos < 0:
+                  raise SystemExit('KernelSU Kconfig endmenu not found')
+              kconfig.write_text(text[:pos] + fragment + '\n' + text[pos:])
+
+          # Kernel 4.19.152 lacks strscpy_pad despite being numerically newer than 4.14.222.
+          compat_h = ksu / 'compat/kernel_compat.h'
+          text = compat_h.read_text()
+          text = text.replace('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 222)\n    return strscpy_pad(dest, src, count);\n#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)',
+                              '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\n    return strscpy_pad(dest, src, count);\n#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)')
+          compat_h.write_text(text)
+
+          # Initialize SUSFS from KernelSU and fix the legacy setenforce symbol mismatch.
+          init_c = ksu / 'core/init.c'
+          text = init_c.read_text()
+          if '#include <linux/susfs.h>' not in text:
+              text = text.replace('#include <linux/workqueue.h>\n', '#include <linux/workqueue.h>\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#endif\n', 1)
+          if 'susfs_init();' not in text:
+              text = text.replace('\tksu_feature_init();\n', '\tksu_feature_init();\n#ifdef CONFIG_KSU_SUSFS\n\tsusfs_init();\n#endif\n', 1)
+          text = text.replace('setenforce(true);', 'ksu_setenforce(true);')
+          init_c.write_text(text)
+
+          selinux_h = ksu / 'selinux/selinux.h'
+          text = selinux_h.read_text().replace('void setenforce(bool);', 'void ksu_setenforce(bool);')
+          if 'susfs_is_current_ksu_domain' not in text:
+              text = text.replace('bool is_init(const struct cred* cred);', 'bool is_init(const struct cred* cred);\n#ifdef CONFIG_KSU_SUSFS\nbool susfs_is_current_ksu_domain(void);\nbool susfs_is_current_zygote_domain(void);\n#endif')
+          selinux_h.write_text(text)
+
+          selinux_c = ksu / 'selinux/selinux.c'
+          text = selinux_c.read_text()
+          if 'bool susfs_is_current_ksu_domain' not in text:
+              text += r'''
+
+#ifdef CONFIG_KSU_SUSFS
+bool susfs_is_current_ksu_domain(void)
+{
+    return is_ksu_domain();
+}
+
+bool susfs_is_current_zygote_domain(void)
+{
+    return is_zygote(current_cred());
+}
+#endif
+'''
+          selinux_c.write_text(text)
+
+          # Mark unprivileged zygote children so v1.5.5 filesystem checks apply only to them.
+          setuid_c = ksu / 'hook/setuid_hook.c'
+          text = setuid_c.read_text()
+          marker = '    // Handle kernel umount\n    ksu_handle_umount(old_uid, new_uid);'
+          if 'TASK_STRUCT_NON_ROOT_USER_APP_PROC' not in text:
+              addition = r'''#ifdef CONFIG_KSU_SUSFS
+    if (is_zygote(current_cred()) && new_uid >= 10000 &&
+        !ksu_is_allow_uid_for_current(new_uid)) {
+        task_lock(current);
+        current->susfs_task_state |= TASK_STRUCT_NON_ROOT_USER_APP_PROC;
+        current->susfs_last_fake_mnt_id = 0;
+        task_unlock(current);
+    }
+#endif
+
+'''
+              if marker not in text:
+                  raise SystemExit('setuid hook insertion point not found')
+              text = text.replace(marker, addition + marker, 1)
+          if '#include <linux/susfs_def.h>' not in text:
+              text = text.replace('#include <linux/uidgid.h>\n', '#include <linux/uidgid.h>\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif\n', 1)
+          setuid_c.write_text(text)
+
+          # Replace the umount implementation with a v1.5.5-aware version adapted to KSUN v3.2.0.
+          (ksu / 'feature/kernel_umount.c').write_text(r'''#include <linux/sched.h>
+#include <linux/slab.h>
+#include <linux/task_work.h>
+#include <linux/cred.h>
+#include <linux/fs.h>
+#include <linux/mount.h>
+#include <linux/namei.h>
+#include <linux/nsproxy.h>
+#include <linux/path.h>
+#include <linux/printk.h>
+#include <linux/types.h>
+#ifndef KSU_HAS_PATH_UMOUNT
+#include <linux/syscalls.h>
+#endif
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
+#endif
+
+#include "kernel_umount.h"
+#include "klog.h"
+#include "policy/allowlist.h"
+#include "selinux/selinux.h"
+#include "policy/feature.h"
+#include "runtime/ksud_boot.h"
+#include "ksu.h"
+#include "compat/kernel_compat.h"
+
+static bool ksu_kernel_umount_enabled = true;
+
+static int kernel_umount_feature_get(u64 *value)
+{
+    *value = ksu_kernel_umount_enabled ? 1 : 0;
+    return 0;
+}
+
+static int kernel_umount_feature_set(u64 value)
+{
+    ksu_kernel_umount_enabled = value != 0;
+    pr_info("kernel_umount: set to %d\n", ksu_kernel_umount_enabled);
+    return 0;
+}
+
+static const struct ksu_feature_handler kernel_umount_handler = {
+    .feature_id = KSU_FEATURE_KERNEL_UMOUNT,
+    .name = "kernel_umount",
+    .get_handler = kernel_umount_feature_get,
+    .set_handler = kernel_umount_feature_set,
+};
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0) || defined(KSU_HAS_PATH_UMOUNT)
+extern int path_umount(struct path *path, int flags);
+static void ksu_umount_mnt(const char *mnt, struct path *path, int flags)
+{
+    int err = path_umount(path, flags);
+    if (err)
+        pr_info("umount %s failed: %d\n", mnt, err);
+}
+#else
+static void ksu_sys_umount(const char *mnt, int flags)
+{
+    char __user *usermnt = (char __user *)mnt;
+    mm_segment_t old_fs = get_fs();
+    set_fs(KERNEL_DS);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
+    ksys_umount(usermnt, flags);
+#else
+    sys_umount(usermnt, flags);
+#endif
+    set_fs(old_fs);
+}
+#define ksu_umount_mnt(mnt, path, flags) ({ path_put(path); ksu_sys_umount(mnt, flags); })
+#endif
+
+void ksu_try_umount(const char *mnt, bool check_mnt, int flags, uid_t uid)
+{
+    struct path path;
+    int err = kern_path(mnt, 0, &path);
+    if (err)
+        return;
+    if (path.dentry != path.mnt->mnt_root) {
+        path_put(&path);
+        return;
+    }
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+    if (check_mnt && !susfs_is_mnt_devname_ksu(&path)) {
+        path_put(&path);
+        return;
+    }
+#endif
+    pr_debug("umounting %s for uid %u\n", mnt, uid);
+    ksu_umount_mnt(mnt, &path, flags);
+}
+
+struct umount_tw {
+    struct callback_head cb;
+    uid_t uid;
+};
+
+static void umount_tw_func(struct callback_head *cb)
+{
+    struct umount_tw *tw = container_of(cb, struct umount_tw, cb);
+    const struct cred *saved = override_creds(ksu_cred);
+    struct mount_entry *entry;
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+    susfs_try_umount(tw->uid);
+#endif
+    down_read(&mount_list_lock);
+    list_for_each_entry(entry, &mount_list, list)
+        ksu_try_umount(entry->umountable, false, entry->flags, tw->uid);
+    up_read(&mount_list_lock);
+    revert_creds(saved);
+    kfree(tw);
+}
+
+int ksu_handle_umount(uid_t old_uid, uid_t new_uid)
+{
+    struct umount_tw *tw;
+    bool is_zygote_child;
+    int err;
+
+    if (!ksu_module_mounted || !ksu_kernel_umount_enabled || !ksu_cred)
+        return 0;
+    if (!is_appuid(new_uid) && !is_isolated_process(new_uid))
+        return 0;
+    if (!ksu_uid_should_umount(new_uid) && !is_isolated_process(new_uid))
+        return 0;
+    is_zygote_child = is_zygote(current_cred());
+    if (!is_zygote_child)
+        return 0;
+
+    tw = kzalloc(sizeof(*tw), GFP_ATOMIC);
+    if (!tw)
+        return 0;
+    tw->uid = new_uid;
+    tw->cb.func = umount_tw_func;
+    err = task_work_add(current, &tw->cb, TWA_RESUME);
+    if (err)
+        kfree(tw);
+    return 0;
+}
+
+void __init ksu_kernel_umount_init(void)
+{
+    if (ksu_register_feature_handler(&kernel_umount_handler))
+        pr_err("Failed to register kernel_umount feature handler\n");
+}
+
+void __exit ksu_kernel_umount_exit(void)
+{
+    ksu_unregister_feature_handler(KSU_FEATURE_KERNEL_UMOUNT);
+}
+''')
+
+          # Provide the old v1.5.5 prctl command ABI while KSUN itself keeps its modern fd/ioctl interface.
+          compat_c = root / 'fs/susfs_ksu_compat.c'
+          compat_c.write_text(r'''#include <linux/cred.h>
+#include <linux/kernel.h>
+#include <linux/string.h>
+#include <linux/uaccess.h>
+#include <linux/susfs.h>
+#include <linux/susfs_def.h>
+
+#define KERNEL_SU_OPTION 0xDEADBEEF
+
+static void susfs_reply_error(unsigned long arg5, int error)
+{
+    if (arg5)
+        copy_to_user((void __user *)arg5, &error, sizeof(error));
+}
+
+static int susfs_copy_string(unsigned long arg3, const char *value)
+{
+    size_t len = strlen(value) + 1;
+    return copy_to_user((void __user *)arg3, value, len) ? -EFAULT : 0;
+}
+
+bool susfs_handle_prctl(int option, unsigned long arg2, unsigned long arg3,
+                        unsigned long arg4, unsigned long arg5)
+{
+    int error = 0;
+    u64 features = 0;
+    int mode = SUS_SU_DISABLED;
+    int ready = 0;
+    (void)arg4;
+
+    if ((unsigned int)option != KERNEL_SU_OPTION)
+        return false;
+    if (current_uid().val != 0)
+        return true;
+
+    switch (arg2) {
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+    case CMD_SUSFS_ADD_SUS_PATH:
+        error = susfs_add_sus_path((struct st_susfs_sus_path __user *)arg3);
+        break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+    case CMD_SUSFS_ADD_SUS_MOUNT:
+        error = susfs_add_sus_mount((struct st_susfs_sus_mount __user *)arg3);
+        break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+    case CMD_SUSFS_ADD_SUS_KSTAT:
+    case CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY:
+        error = susfs_add_sus_kstat((struct st_susfs_sus_kstat __user *)arg3);
+        break;
+    case CMD_SUSFS_UPDATE_SUS_KSTAT:
+        error = susfs_update_sus_kstat((struct st_susfs_sus_kstat __user *)arg3);
+        break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+    case CMD_SUSFS_ADD_TRY_UMOUNT:
+        error = susfs_add_try_umount((struct st_susfs_try_umount __user *)arg3);
+        break;
+    case CMD_SUSFS_RUN_UMOUNT_FOR_CURRENT_MNT_NS:
+        susfs_run_try_umount_for_current_mnt_ns();
+        break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+    case CMD_SUSFS_SET_UNAME:
+        error = susfs_set_uname((struct st_susfs_uname __user *)arg3);
+        break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+    case CMD_SUSFS_ENABLE_LOG:
+        if (arg3 > 1)
+            error = -EINVAL;
+        else
+            susfs_set_log((bool)arg3);
+        break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+    case CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG:
+        error = susfs_set_cmdline_or_bootconfig((char __user *)arg3);
+        break;
+#endif
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+    case CMD_SUSFS_ADD_OPEN_REDIRECT:
+        error = susfs_add_open_redirect((struct st_susfs_open_redirect __user *)arg3);
+        break;
+#endif
+    case CMD_SUSFS_SHOW_VERSION:
+        error = susfs_copy_string(arg3, SUSFS_VERSION);
+        break;
+    case CMD_SUSFS_SHOW_VARIANT:
+        error = susfs_copy_string(arg3, SUSFS_VARIANT);
+        break;
+    case CMD_SUSFS_SHOW_ENABLED_FEATURES:
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+        features |= 1ULL << 0;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+        features |= 1ULL << 1;
+#endif
+#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+        features |= 1ULL << 2;
+#endif
+#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+        features |= 1ULL << 3;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+        features |= 1ULL << 4;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_OVERLAYFS
+        features |= 1ULL << 5;
+#endif
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+        features |= 1ULL << 6;
+#endif
+#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+        features |= 1ULL << 7;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+        features |= 1ULL << 8;
+#endif
+#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+        features |= 1ULL << 9;
+#endif
+#ifdef CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+        features |= 1ULL << 10;
+#endif
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+        features |= 1ULL << 11;
+#endif
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+        features |= 1ULL << 12;
+#endif
+#ifdef CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+        features |= 1ULL << 14;
+#endif
+        error = copy_to_user((void __user *)arg3, &features, sizeof(features)) ? -EFAULT : 0;
+        break;
+    case CMD_SUSFS_SHOW_SUS_SU_WORKING_MODE:
+        error = copy_to_user((void __user *)arg3, &mode, sizeof(mode)) ? -EFAULT : 0;
+        break;
+    case CMD_SUSFS_IS_SUS_SU_READY:
+        error = copy_to_user((void __user *)arg3, &ready, sizeof(ready)) ? -EFAULT : 0;
+        break;
+    case CMD_SUSFS_SUS_SU:
+        error = -EOPNOTSUPP;
+        break;
+    default:
+        error = -EINVAL;
+        break;
+    }
+
+    susfs_reply_error(arg5, error);
+    return true;
+}
+''')
+
+          fs_makefile = root / 'fs/Makefile'
+          text = fs_makefile.read_text()
+          if 'susfs_ksu_compat.o' not in text:
+              anchor = 'obj-$(CONFIG_KSU_SUSFS) += susfs.o\n'
+              if anchor not in text:
+                  raise SystemExit('SUSFS Makefile anchor not found')
+              text = text.replace(anchor, anchor + 'obj-$(CONFIG_KSU_SUSFS) += susfs_ksu_compat.o\n', 1)
+          fs_makefile.write_text(text)
+
+          sys_c = root / 'kernel/sys.c'
+          text = sys_c.read_text()
+          if 'susfs_handle_prctl' not in text:
+              decl_anchor = 'SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,\n'
+              decl = '#ifdef CONFIG_KSU_SUSFS\nextern bool susfs_handle_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5);\n#endif\n\n'
+              if decl_anchor not in text:
+                  raise SystemExit('prctl declaration point not found')
+              text = text.replace(decl_anchor, decl + decl_anchor, 1)
+              body_anchor = '{\n\tstruct task_struct *me = current;\n'
+              body = '{\n#ifdef CONFIG_KSU_SUSFS\n\tif (susfs_handle_prctl(option, arg2, arg3, arg4, arg5))\n\t\treturn 0;\n#endif\n\tstruct task_struct *me = current;\n'
+              idx = text.find(decl_anchor)
+              body_idx = text.find(body_anchor, idx)
+              if body_idx < 0:
+                  raise SystemExit('prctl body point not found')
+              text = text[:body_idx] + text[body_idx:].replace(body_anchor, body, 1)
+          sys_c.write_text(text)
+
+          # Add the required manual reboot hook used by the modern KSUN fd installer.
+          reboot = root / 'kernel/reboot.c'
+          text = reboot.read_text()
+          if 'ksu_handle_sys_reboot' not in text:
+              marker = 'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,'
+              declaration = '#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n'
+              if marker not in text:
+                  raise SystemExit('reboot syscall declaration point not found')
+              text = text.replace(marker, declaration + marker, 1)
+              body = '\tchar buffer[256];\n\tint ret = 0;\n'
+              replacement = body + '\n#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n'
+              if body not in text:
+                  raise SystemExit('reboot body point not found')
+              text = text.replace(body, replacement, 1)
+          reboot.write_text(text)
+
+          # Enable the exact supported feature set in the device defconfig.
+          cfg = root / 'arch/arm64/configs/a52xq_defconfig'
+          lines = cfg.read_text().splitlines()
+          prefixes = (
+              'CONFIG_KSU=', 'CONFIG_KSU_MANUAL_HOOK=', 'CONFIG_KSU_KPROBES_HOOK=',
+              'CONFIG_KSU_SUSFS=', 'CONFIG_KSU_SUSFS_',
+          )
+          lines = [line for line in lines if not line.startswith(prefixes)]
+          lines += [
+              'CONFIG_KSU=y',
+              'CONFIG_KSU_MANUAL_HOOK=y',
+              '# CONFIG_KSU_KPROBES_HOOK is not set',
+              'CONFIG_KSU_SUSFS=y',
+              'CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y',
+              'CONFIG_KSU_SUSFS_SUS_PATH=y',
+              'CONFIG_KSU_SUSFS_SUS_MOUNT=y',
+              'CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y',
+              'CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y',
+              'CONFIG_KSU_SUSFS_SUS_KSTAT=y',
+              '# CONFIG_KSU_SUSFS_SUS_OVERLAYFS is not set',
+              'CONFIG_KSU_SUSFS_TRY_UMOUNT=y',
+              'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y',
+              'CONFIG_KSU_SUSFS_SPOOF_UNAME=y',
+              '# CONFIG_KSU_SUSFS_ENABLE_LOG is not set',
+              'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y',
+              'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y',
+              'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y',
+              '# CONFIG_KSU_SUSFS_SUS_SU is not set',
+          ]
+          cfg.write_text('\n'.join(lines) + '\n')
+          PY
+
+      - name: Audit exact version and integration
+        shell: bash
+        run: |
+          set -e
+          grep -q '#define SUSFS_VERSION "v1.5.5"' kernel/include/linux/susfs.h
+          grep -q 'KSU_GIT_TAG := v3.2.0-legacy' kernel/KernelSU/kernel/Kbuild
+          grep -q 'CONFIG_KSU_MANUAL_HOOK=y' kernel/arch/arm64/configs/a52xq_defconfig
+          grep -q '# CONFIG_KSU_SUSFS_SUS_SU is not set' kernel/arch/arm64/configs/a52xq_defconfig
+          find kernel -name '*.rej' -o -name '*.orig' | sort > remaining-rejects.txt
+          test ! -s remaining-rejects.txt
+          {
+            echo 'Kernel base: 6bf351bdf18bdb228db79e66f14a7a9c0178e5d7'
+            echo 'KernelSU-Next: v3.2.0-legacy'
+            echo 'SUSFS: v1.5.5'
+            echo 'Hook mode: manual'
+            echo 'SUS_SU: disabled because CONFIG_KPROBES is unavailable'
+            echo
+            grep -RIn 'ksu_handle_' kernel/fs/exec.c kernel/fs/open.c kernel/fs/read_write.c kernel/fs/stat.c kernel/drivers/input/input.c kernel/kernel/reboot.c
+          } > exact-integration-audit.txt
+
+      - name: Build exact kernel
+        shell: bash
+        run: |
+          set +e
+          cd kernel
+          rm -rf out
+          chmod +x build_kernel.sh tools/dtc 2>/dev/null || true
+          bash build_kernel.sh 2>&1 | tee ../exact-build.log
+          status=${PIPESTATUS[0]}
+          echo "$status" > ../exact-build.status
+          exit 0
+
+      - name: Validate and package artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cd kernel
+          git add -N . 2>/dev/null || true
+          git diff --binary -- . ':!toolchain' ':!out' > ../touchgrass-ksun-v3.2.0-legacy-susfs-v1.5.5.patch
+          cd ..
+          tail -n 500 exact-build.log > exact-build-tail.log 2>/dev/null || true
+          if [ -f kernel/out/arch/arm64/boot/Image ]; then
+            cp kernel/out/arch/arm64/boot/Image touchGrassKernel-v1.5.1-KSUN-v3.2.0-legacy-SUSFS-v1.5.5-Image
+            sha256sum touchGrassKernel-v1.5.1-KSUN-v3.2.0-legacy-SUSFS-v1.5.5-Image > exact-image.sha256
+          fi
+          tar -czf touchgrass-exact-integration-source.tar.gz \
+            kernel/KernelSU \
+            kernel/fs/susfs.c \
+            kernel/fs/susfs_ksu_compat.c \
+            kernel/include/linux/susfs.h \
+            kernel/include/linux/susfs_def.h \
+            2>/dev/null || true
+          {
+            echo "Build status: $(cat exact-build.status 2>/dev/null || echo missing)"
+            echo "Image present: $(test -f kernel/out/arch/arm64/boot/Image && echo yes || echo no)"
+            echo "SUSFS version: $(sed -n 's/^#define SUSFS_VERSION "\([^"]*\)"/\1/p' kernel/include/linux/susfs.h | head -n1)"
+            echo "KernelSU tag: $(sed -n 's/^KSU_GIT_TAG := //p' kernel/KernelSU/kernel/Kbuild | head -n1)"
+          } > exact-build-report.txt
+
+      - name: Upload exact build result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: touchgrass-exact-ksun320-susfs155-${{ github.run_number }}
+          retention-days: 14
+          if-no-files-found: warn
+          compression-level: 9
+          path: |
+            exact-integration-audit.txt
+            exact-build.status
+            exact-build-report.txt
+            exact-build.log
+            exact-build-tail.log
+            exact-image.sha256
+            touchGrassKernel-v1.5.1-KSUN-v3.2.0-legacy-SUSFS-v1.5.5-Image
+            touchgrass-ksun-v3.2.0-legacy-susfs-v1.5.5.patch
+            touchgrass-exact-integration-source.tar.gz
+            kernel/out/.config

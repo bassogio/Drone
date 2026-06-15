@@ -1,0 +1,65 @@
+name: Inspect SukiSU Ultra builtin compatibility
+
+on:
+  push:
+    branches:
+      - touchgrass-susfs-build
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out integration branch
+        uses: actions/checkout@v4
+
+      - name: Clone pinned SukiSU Ultra builtin tree
+        run: |
+          git init sukisu
+          cd sukisu
+          git remote add origin https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+          git fetch --depth=1 origin b88403d2561b6e00dff84a3c851e630c62f57fd0
+          git checkout --detach FETCH_HEAD
+          git rev-parse HEAD > ../sukisu-commit.txt
+          cd ..
+
+      - name: Audit hook ABI, configuration, and SUSFS integration
+        shell: bash
+        run: |
+          {
+            echo '=== Commit ==='
+            cat sukisu-commit.txt
+            echo
+            echo '=== Kernel tree ==='
+            find sukisu/kernel -maxdepth 3 -type f -o -type l | sort
+            echo
+            echo '=== Hook symbols ==='
+            grep -RInE 'ksu_handle_|ksu_execve|ksu_vfs|syscall_hook|MANUAL_HOOK|TRACEPOINT_HOOK' sukisu/kernel || true
+            echo
+            echo '=== Kernel Umount ==='
+            grep -RInE 'kernel_umount|ksu_kernel_umount_enabled|register_feature_handler' sukisu/kernel/feature sukisu/kernel/hook || true
+            echo
+            echo '=== Version markers ==='
+            grep -RInE 'KSU_VERSION|KSU_GIT_VERSION|SUKISU|SUSFS_VERSION' sukisu/kernel sukisu/include 2>/dev/null || true
+            echo
+            echo '=== Kconfig ==='
+            cat sukisu/kernel/Kconfig
+          } > sukisu-inspection.txt
+
+          tar -czf sukisu-builtin-kernel-tree.tar.gz sukisu/kernel sukisu/uapi sukisu/include 2>/dev/null || \
+            tar -czf sukisu-builtin-kernel-tree.tar.gz sukisu/kernel
+
+      - name: Upload inspection artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sukisu-builtin-inspection-${{ github.run_number }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            sukisu-commit.txt
+            sukisu-inspection.txt
+            sukisu-builtin-kernel-tree.tar.gz

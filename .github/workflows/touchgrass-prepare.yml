@@ -1,0 +1,157 @@
+name: Prepare TouchGrass KernelSU-Next SUSFS source
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git patch python3
+
+      - name: Clone exact TouchGrass source
+        run: |
+          git clone --no-checkout https://github.com/micr0softstore/samsung_android_kernel_a52xq.git kernel
+          cd kernel
+          git fetch --depth=1 origin 6bf351bdf18bdb228db79e66f14a7a9c0178e5d7
+          git checkout --detach FETCH_HEAD
+
+      - name: Import KernelSU-Next legacy core
+        run: |
+          git init ksun-src
+          cd ksun-src
+          git remote add origin https://github.com/crdroidandroid/android_kernel_oneplus_sm8350.git
+          git config core.sparseCheckout true
+          printf 'drivers/kernelsu/\n' > .git/info/sparse-checkout
+          git fetch --depth=1 origin b0e9f56d42a064443cdf4ace2187595eb04544e9
+          git checkout --detach FETCH_HEAD
+          cd ..
+
+          mkdir -p kernel/KernelSU/kernel
+          cp -a ksun-src/drivers/kernelsu/. kernel/KernelSU/kernel/
+          rm -rf kernel/drivers/kernelsu
+          ln -s ../KernelSU/kernel kernel/drivers/kernelsu
+          grep -q 'obj-$(CONFIG_KSU).*kernelsu' kernel/drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> kernel/drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' kernel/drivers/Kconfig || printf '\nsource "drivers/kernelsu/Kconfig"\n' >> kernel/drivers/Kconfig
+
+      - name: Import and apply SUSFS v1.5.5
+        shell: bash
+        run: |
+          git init susfs-src
+          cd susfs-src
+          git remote add origin https://github.com/Star-Seven/susfs4ksu.git
+          git config core.sparseCheckout true
+          printf 'kernel_patches/\n' > .git/info/sparse-checkout
+          git fetch --depth=1 origin 9bab63cbaf41b51edc35cd585970adc3e6636cda
+          git checkout --detach FETCH_HEAD
+          cd ..
+
+          cp susfs-src/kernel_patches/fs/*.c kernel/fs/
+          cp susfs-src/kernel_patches/include/linux/*.h kernel/include/linux/
+
+          set +e
+          cd kernel/KernelSU
+          patch --batch --forward -p1 < ../../susfs-src/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch > ../../ksu_patch.log 2>&1
+          echo $? > ../../ksu_patch.status
+          cd ../..
+          cd kernel
+          patch --batch --forward -p1 < ../susfs-src/kernel_patches/50_add_susfs_in_kernel-4.19.patch > ../kernel_patch.log 2>&1
+          echo $? > ../kernel_patch.status
+          cd ..
+
+      - name: Add manual reboot hook and config
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          reboot = Path('kernel/kernel/reboot.c')
+          text = reboot.read_text()
+          if 'ksu_handle_sys_reboot' not in text:
+              marker = 'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,'
+              declaration = '#ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n'
+              if marker not in text:
+                  raise SystemExit('reboot syscall declaration not found')
+              text = text.replace(marker, declaration + marker, 1)
+              body = '\tchar buffer[256];\n\tint ret = 0;\n'
+              replacement = body + '\n#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n'
+              if body not in text:
+                  raise SystemExit('reboot syscall body not found')
+              text = text.replace(body, replacement, 1)
+              reboot.write_text(text)
+
+          cfg = Path('kernel/arch/arm64/configs/a52xq_defconfig')
+          lines = cfg.read_text().splitlines()
+          prefixes = ('CONFIG_KSU=', 'CONFIG_KSU_MANUAL_HOOK=', 'CONFIG_KSU_KPROBES_HOOK=', 'CONFIG_KSU_SUSFS=', 'CONFIG_KSU_SUSFS_')
+          lines = [line for line in lines if not line.startswith(prefixes)]
+          lines += [
+              'CONFIG_KSU=y',
+              'CONFIG_KSU_MANUAL_HOOK=y',
+              '# CONFIG_KSU_KPROBES_HOOK is not set',
+              'CONFIG_KSU_SUSFS=y',
+              'CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y',
+              'CONFIG_KSU_SUSFS_SUS_PATH=y',
+              'CONFIG_KSU_SUSFS_SUS_MOUNT=y',
+              'CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y',
+              'CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y',
+              'CONFIG_KSU_SUSFS_SUS_KSTAT=y',
+              '# CONFIG_KSU_SUSFS_SUS_OVERLAYFS is not set',
+              'CONFIG_KSU_SUSFS_TRY_UMOUNT=y',
+              'CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y',
+              'CONFIG_KSU_SUSFS_SPOOF_UNAME=y',
+              '# CONFIG_KSU_SUSFS_ENABLE_LOG is not set',
+              'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y',
+              'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y',
+              'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y',
+              '# CONFIG_KSU_SUSFS_SUS_SU is not set',
+          ]
+          cfg.write_text('\n'.join(lines) + '\n')
+          PY
+
+      - name: Package prepared source and diagnostics
+        shell: bash
+        run: |
+          cd kernel
+          git add -N .
+          git diff --binary -- . ':!toolchain' > ../touchgrass-ksunext-susfs.patch
+          cd ..
+          find kernel -name '*.rej' -o -name '*.orig' | sort > reject-files.txt
+          tar -czf touchgrass-integration-files.tar.gz \
+            kernel/KernelSU \
+            kernel/fs/susfs.c \
+            kernel/include/linux/susfs.h \
+            kernel/include/linux/susfs_def.h \
+            kernel/include/linux/susfs_cmd.h \
+            2>/dev/null || true
+          {
+            echo "KSU patch status: $(cat ksu_patch.status)"
+            echo "Kernel patch status: $(cat kernel_patch.status)"
+            echo "Rejects:"
+            cat reject-files.txt
+          } > prepare-report.txt
+
+      - name: Upload prepared source
+        uses: actions/upload-artifact@v4
+        with:
+          name: touchgrass-prepared-source-${{ github.run_number }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            touchgrass-ksunext-susfs.patch
+            touchgrass-integration-files.tar.gz
+            prepare-report.txt
+            ksu_patch.log
+            kernel_patch.log
+            reject-files.txt
+            kernel/**/*.rej
+            kernel/**/*.orig
