@@ -72,6 +72,7 @@ jobs:
           ! grep -A5 'void __init ksu_kernel_umount_init' kernel/KernelSU/kernel/feature/kernel_umount.c | grep -q 'ksu_register_feature_handler'
           grep -q '/\* fall through \*/' kernel/KernelSU/kernel/policy/allowlist.c
           grep -q '#define USER_ARG_NULL (\*user_arg_null_ptr())' kernel/KernelSU/kernel/sulog/event.c
+          grep -q '^kernelsu-objs += feature/selinux_hide.o$' kernel/KernelSU/kernel/Kbuild
 
           grep -Rqs 'int ksu_handle_execveat(' kernel/KernelSU/kernel
           grep -Rqs 'int ksu_handle_execveat_sucompat(' kernel/KernelSU/kernel
@@ -91,6 +92,7 @@ jobs:
             echo 'ADB root: disabled'
             echo 'Kernel Umount: permanently disabled and hidden'
             echo 'Linux 4.19 compatibility adapter: active'
+            echo 'SELinux-hide object: explicitly included in builtin Kbuild'
             echo
             echo 'TouchGrass hook call sites:'
             grep -RIn 'ksu_handle_' kernel/fs/exec.c kernel/fs/open.c kernel/fs/read_write.c kernel/fs/stat.c kernel/drivers/input/input.c kernel/kernel/reboot.c || true
